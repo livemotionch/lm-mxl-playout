@@ -16,7 +16,7 @@ import zlib
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
-BIN = ROOT / "build" / "mxl-test-player"
+BIN = ROOT / "build" / "lm-mxl-playout"
 DUMP = ROOT / "build" / "player_grain_dump"
 BASE = os.environ.get("PLAYER_BASE", "http://127.0.0.1:18430")
 PORT = int(BASE.rsplit(":", 1)[-1])

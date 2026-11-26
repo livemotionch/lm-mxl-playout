@@ -66,7 +66,7 @@ onUnmounted(() => {
 
 <template>
   <header>
-    <h1>mxl-test-player</h1>
+    <h1>lm-mxl-playout</h1>
     <span v-if="live.info" class="node">{{ live.info.label }} · {{ live.info.format }} · {{ live.info.outputs }} output{{ live.info.outputs > 1 ? "s" : "" }}</span>
     <span class="spacer"></span>
     <Pill v-if="live.outputs.length" :text="`${playing} of ${live.outputs.length} playing`" :kind="playing ? 'ok' : 'neutral'" title="outputs in play" />

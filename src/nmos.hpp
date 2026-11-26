@@ -32,7 +32,7 @@ struct NmosSenderState {
 struct NmosModel {
     std::string node_id;
     std::string device_id;
-    std::string label = "MXL Test Player";
+    std::string label = "MXL Playout";
     std::string host;
     int api_port = 3282;
     std::string domain_id;

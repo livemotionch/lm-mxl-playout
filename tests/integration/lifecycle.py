@@ -14,7 +14,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
-BIN = ROOT / "build" / "mxl-test-player"
+BIN = ROOT / "build" / "lm-mxl-playout"
 WEB = 18230
 NMOS = 18282
 REG = 18310

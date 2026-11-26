@@ -464,7 +464,7 @@ Config load_config(const std::string& file_path, const char* const* envp) {
         if (!host.empty()) c.nmos_seed = host + "-player";
         else c.nmos_seed = fallback_seed(c.config_dir);
     }
-    c.nmos_label = pick_str("NMOS_LABEL", "nmos_label", "MXL Test Player");
+    c.nmos_label = pick_str("NMOS_LABEL", "nmos_label", "MXL Playout");
     note("NMOS_TAGS", file.contains("nmos_tags"));
     if (auto e = env_get(env, "NMOS_TAGS"); !e.empty()) {
         try {

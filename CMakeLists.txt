@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(mxl-test-player VERSION 1.3.3 LANGUAGES CXX C)
+project(lm-mxl-playout VERSION 2.0.0 LANGUAGES CXX C)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -163,9 +163,9 @@ target_compile_options(player_core PRIVATE -Wall -Wextra -Wno-unused-parameter)
 # GET /api/v1/info reports both.
 target_compile_definitions(player_core PRIVATE PLAYER_VERSION="${PROJECT_VERSION}" PLAYER_MXL_REVISION="${MXL_TAG}")
 
-add_executable(mxl-test-player src/main.cpp)
-target_link_libraries(mxl-test-player PRIVATE player_core)
-target_compile_options(mxl-test-player PRIVATE -Wall -Wextra)
+add_executable(lm-mxl-playout src/main.cpp)
+target_link_libraries(lm-mxl-playout PRIVATE player_core)
+target_compile_options(lm-mxl-playout PRIVATE -Wall -Wextra)
 
 if(PLAYER_BUILD_TESTS)
     add_executable(player_tests tests/test_player.cpp tests/test_playout.cpp)
@@ -178,6 +178,6 @@ if(PLAYER_BUILD_TESTS)
     target_link_libraries(player_grain_dump PRIVATE mxl::mxl)
 endif()
 
-install(TARGETS mxl-test-player RUNTIME DESTINATION bin)
-install(DIRECTORY assets/fonts DESTINATION share/mxl-test-player)
-install(DIRECTORY web/dist DESTINATION share/mxl-test-player/web OPTIONAL)
+install(TARGETS lm-mxl-playout RUNTIME DESTINATION bin)
+install(DIRECTORY assets/fonts DESTINATION share/lm-mxl-playout)
+install(DIRECTORY web/dist DESTINATION share/lm-mxl-playout/web OPTIONAL)

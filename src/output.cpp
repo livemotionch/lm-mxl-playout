@@ -526,7 +526,9 @@ bool Output::load_layers(const VideoFormat& fmt, std::vector<std::shared_ptr<con
     }
     if (it->second.media) graveyard.push_back(std::move(it->second.media));
     it->second.media = pub;
-    if (pub->ready) playout_.set_ready(id, pub->frames);
+    const bool streamed = pub->ready && !pub->mezz.empty() && !pub->anim;
+    it->second.signalled = pub->ready && !streamed;
+    if (it->second.signalled) playout_.set_ready(id, pub->frames);
     return true;
 }
 
@@ -553,7 +555,9 @@ void Output::sync_layers() {
                 if (o.spec.item_id == r.spec.item_id && o.media && o.media->ready && !o.load) {
                     e.media = o.media;
                     e.load = false;
-                    playout_.set_ready(r.id, o.media->frames);
+                    // A streamed video still needs its own stream primed.
+                    e.signalled = o.media->mezz.empty() || o.media->anim;
+                    if (e.signalled) playout_.set_ready(r.id, o.media->frames);
                     break;
                 }
             }
@@ -571,6 +575,16 @@ std::int64_t Output::frame_now() const {
     return static_cast<std::int64_t>(fmt_.interlaced() ? idx / 2 : idx);
 }
 
+std::int64_t Output::command_frame() const {
+    // The writer writes the current frame, or the one after it when it wrote that already. Taking
+    // effect one later than that would leave one more frame of the old state on air; earlier, a
+    // frame of the new clip parked at its in point before it rolls.
+    const std::int64_t now = frame_now();
+    const std::int64_t last = playout_.last_tick();
+    if (last <= 0 || last < now - 50) return now + 1;  // the writer has not run (yet) or stalled
+    return std::max(last + 1, now);
+}
+
 bool Output::playout(const std::function<bool(Playout&, std::int64_t now)>& fn) {
     std::function<void()> cb;
     bool ok = false;
@@ -583,8 +597,7 @@ bool Output::playout(const std::function<bool(Playout&, std::int64_t now)>& fn) 
             origin_valid_ = false;
             media_gen_++;
         }
-        // The next frame: the writer may have written the current one already.
-        ok = fn(playout_, frame_now() + 1);
+        ok = fn(playout_, command_frame());
         sync_layers();
         cb = on_change;
     }
@@ -716,10 +729,12 @@ void Output::writer_main() {
             int decoder = -1;
         } shown_a, shown_b;
         struct Prime {
+            int id = 0;
             std::shared_ptr<const Media> media;
             ClipSpec spec;
             int decoder = -1;
             std::int64_t frame = 0;
+            bool signal = false;  // tell the playout it is ready once the stream holds the frame
         };
         std::vector<Prime> primes;
         bool decoder_used[2] = {false, false};
@@ -747,9 +762,11 @@ void Output::writer_main() {
                 }
             }
             for (auto& [id, e] : layers_) {
+                const bool shown = id == pf.a.layer || id == pf.b.layer;
+                const bool unsignalled = e.media && e.media->ready && !e.signalled;
                 if (id == pf.a.layer) shown_a = Shown{e.media, e.spec, e.decoder};
                 else if (id == pf.b.layer) shown_b = Shown{e.media, e.spec, e.decoder};
-                else if (e.decoder >= 0) primes.push_back(Prime{e.media, e.spec, e.decoder, e.preroll});
+                if (e.decoder >= 0 && (!shown || unsignalled)) primes.push_back(Prime{id, e.media, e.spec, e.decoder, e.preroll, unsignalled});
             }
             idle = !pf.a.layer && !pf.b.layer;
         } else {
@@ -915,7 +932,8 @@ void Output::writer_main() {
             hi = spec.out > 0 ? std::min(spec.out, m.frames) : m.frames;
             if (hi <= lo) hi = lo + 1;
         };
-        auto layer_pic = [&](const Shown& l, std::int64_t frame) {
+        // `rolling`: a frame missing from the stream counts as missed (not while the stream primes).
+        auto layer_pic = [&](const Shown& l, std::int64_t frame, bool rolling) {
             Pic p;
             const auto& m = l.media;
             p.alpha_item = l.spec.type != "video" || (m && (m->still || m->anim));
@@ -955,7 +973,7 @@ void Output::writer_main() {
                     p.fill = sf->v210.data();
                     p.streamed = sf;
                 } else {
-                    ++stream_missed_;
+                    if (rolling) ++stream_missed_;
                     if (dec.shown().v210.size() == full_bytes) p.fill = dec.shown().v210.data();
                 }
             }
@@ -964,14 +982,26 @@ void Output::writer_main() {
         Pic pic_a, pic_b;
         if (playout_mode) {
             // The next clip decodes ahead from its in point, so the take cuts to a decoded frame.
+            std::vector<int> primed;
             for (const auto& pr : primes) {
                 std::int64_t lo = 0, hi = 1;
                 window(*pr.media, pr.spec, lo, hi);
-                decoders_[pr.decoder]->prime(pr.media, pr.media->mezz, std::clamp<std::int64_t>(pr.frame, lo, hi - 1), lo, hi,
-                                             pr.spec.end == EndAction::Loop);
+                const std::int64_t at = std::clamp<std::int64_t>(pr.frame, lo, hi - 1);
+                auto& dec = *decoders_[pr.decoder];
+                dec.prime(pr.media, pr.media->mezz, at, lo, hi, pr.spec.end == EndAction::Loop);
+                if (pr.signal && dec.has(pr.media, at)) primed.push_back(pr.id);
             }
-            if (pf.a.layer) pic_a = layer_pic(shown_a, pf.a.frame);
-            if (pf.b.layer) pic_b = layer_pic(shown_b, pf.b.frame);
+            if (!primed.empty()) {
+                std::lock_guard lock(mu_);
+                for (const int id : primed) {
+                    auto it = layers_.find(id);
+                    if (it == layers_.end() || !it->second.media) continue;
+                    it->second.signalled = true;
+                    playout_.set_ready(id, it->second.media->frames);
+                }
+            }
+            if (pf.a.layer) pic_a = layer_pic(shown_a, pf.a.frame, pf.a.rolling);
+            if (pf.b.layer) pic_b = layer_pic(shown_b, pf.b.frame, pf.b.rolling);
             if (shown_a.media) item_name = shown_a.media->name;
             else if (pf.a.layer) item_name = shown_a.spec.name;
             ahead_ = shown_a.decoder >= 0 ? decoders_[shown_a.decoder]->ahead() : 0;
@@ -1427,7 +1457,7 @@ void Output::command(const std::string& action) {
         if (source_.type == "playout") {
             // The test player's transport on a playout output: play rolls (or takes the next clip),
             // pause holds, stop goes to black, restart plays from the in point, step moves one frame.
-            const std::int64_t now = frame_now() + 1;
+            const std::int64_t now = command_frame();
             if (action == "play" || action == "take") {
                 if (action == "take" || !playout_.resume(now)) playout_.take(now);
             } else if (action == "pause") {
@@ -1578,7 +1608,7 @@ void Output::seek(std::int64_t frame) {
     {
         std::lock_guard lock(mu_);
         if (frame < 0) frame = 0;
-        if (source_.type == "playout") playout_.seek(frame_now() + 1, frame);  // from the program's in point
+        if (source_.type == "playout") playout_.seek(command_frame(), frame);  // from the program's in point
         origin_media_ = frame;
         hold_frame_ = frame;
         origin_valid_ = false;

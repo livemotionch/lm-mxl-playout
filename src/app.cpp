@@ -48,9 +48,33 @@ std::string mime_of(const std::string& path) {
     return "application/octet-stream";
 }
 
+// A new id for a playlist entry: stable while the list is edited (the UI and the playout status
+// name entries by it).
+std::string new_entry_id(const Uuid& node) {
+    static std::atomic<std::uint64_t> serial{0};
+    const auto t = std::chrono::system_clock::now().time_since_epoch().count();
+    return uuid_v5(node, "entry/" + std::to_string(t) + "/" + std::to_string(serial++)).str();
+}
+
+// A playlist as stored: {id, name, loop, entries: [{id, item_id, in_s, out_s, hold_s, end,
+// transition, transition_frames}]}. Entries get an id; the test player's `loops` (0: forever)
+// becomes the end action loop.
+json normalize_playlist(json b, const Uuid& node) {
+    if (!b.is_object()) throw std::runtime_error("a playlist is a JSON object");
+    if (!b.contains("entries") || !b.at("entries").is_array()) b["entries"] = json::array();
+    if (!b.contains("loop")) b["loop"] = false;
+    for (auto& e : b["entries"]) {
+        if (!e.is_object()) throw std::runtime_error("a playlist entry is a JSON object");
+        if (!e.contains("id") || !e.at("id").is_string() || e.at("id").get<std::string>().empty()) e["id"] = new_entry_id(node);
+        if (!e.contains("end")) e["end"] = (e.contains("loops") && e.at("loops").is_number() && e.at("loops").get<int>() == 0) ? "loop" : "next";
+        if (!e.contains("transition")) e["transition"] = "cut";
+    }
+    return b;
+}
+
 std::string find_web_root(const Config& cfg) {
     if (!cfg.web_root.empty() && fs::exists(cfg.web_root)) return cfg.web_root;
-    const char* candidates[] = {"web/dist", "../share/mxl-test-player/web", "/usr/local/share/mxl-test-player/web"};
+    const char* candidates[] = {"web/dist", "../share/lm-mxl-playout/web", "/usr/local/share/lm-mxl-playout/web"};
     for (const char* c : candidates)
         if (fs::exists(fs::path(c) / "index.html")) return c;
     return "web/dist";
@@ -119,6 +143,7 @@ struct App::Impl {
     std::string domain_id;
     std::vector<json> presets;
     std::vector<json> playlists;
+    std::mutex lists_mu;  // presets and playlists (HTTP threads)
     std::map<std::string, Upload> uploads;
     std::mutex mu;
     std::mutex state_mu;  // one writer of the state file at a time (HTTP threads, outputs, IS-05)
@@ -136,6 +161,10 @@ struct App::Impl {
     void refresh_nmos();
     json metrics() const;
     void handle(const HttpRequest& req, HttpResponse& res);
+    // Playout (POST /api/v1/outputs/{n}/playout).
+    bool clip_spec(const json& j, const VideoFormat& fmt, EndAction default_end, double default_hold_s, ClipSpec& out, std::string& error);
+    std::shared_ptr<PlaylistContext> playlist_context(const std::string& id, const VideoFormat& fmt, std::string& error);
+    void playout_action(Output& o, const json& b, HttpResponse& res);
     Output* out(int index);
 };
 
@@ -161,12 +190,18 @@ void App::Impl::save_state() {
                            {"master_video", st.value("master_video", true)},
                            {"master_audio", st.value("master_audio", true)},
                            {"master_data", st.value("master_data", true)},
-                           {"master_key", st.value("master_key", true)}});
+                           {"master_key", st.value("master_key", true)},
+                           {"cue_mode", st.contains("playout") ? st["playout"].value("cue_mode", "park") : "park"}});
     }
     std::error_code ec;
     fs::create_directories(fs::path(cfg.state_path).parent_path(), ec);
     std::ofstream f(cfg.state_path);
-    f << json{{"outputs", arr}, {"presets", presets}, {"playlists", playlists}}.dump(2);
+    json doc;
+    {
+        std::lock_guard lock(lists_mu);
+        doc = json{{"outputs", arr}, {"presets", presets}, {"playlists", playlists}};
+    }
+    f << doc.dump(2);
 }
 
 void App::Impl::load_state() {
@@ -178,13 +213,26 @@ void App::Impl::load_state() {
     } catch (...) {
         return;
     }
-    if (j.contains("presets") && j["presets"].is_array()) presets = j["presets"].get<std::vector<json>>();
-    if (j.contains("playlists") && j["playlists"].is_array()) playlists = j["playlists"].get<std::vector<json>>();
+    {
+        std::lock_guard lock(lists_mu);
+        if (j.contains("presets") && j["presets"].is_array()) presets = j["presets"].get<std::vector<json>>();
+        if (j.contains("playlists") && j["playlists"].is_array()) {
+            playlists.clear();
+            for (const auto& p : j["playlists"]) {
+                try {
+                    playlists.push_back(normalize_playlist(p, node));
+                } catch (const std::exception&) {
+                    // a broken playlist is left out
+                }
+            }
+        }
+    }
     if (!j.contains("outputs")) return;
     int i = 0;
     for (const auto& o : j["outputs"]) {
         if (i >= static_cast<int>(outputs.size())) break;
         if (o.contains("burnin")) outputs[i]->set_burnin(burnin_from_json(o["burnin"]));
+        if (o.contains("cue_mode") && o["cue_mode"].is_string()) outputs[i]->set_cue_mode(parse_cue_mode(o["cue_mode"].get<std::string>(), CueMode::Park));
         if (o.contains("source")) outputs[i]->set_source(source_from_json(o["source"]));
         if (o.contains("transport")) outputs[i]->command(o["transport"].get<std::string>() == "pause" ? "pause" : o["transport"].get<std::string>() == "stop" ? "stop" : "play");
         const auto ids = outputs[i]->ids();
@@ -284,12 +332,175 @@ json App::Impl::metrics() const {
     return json();  // placeholder, real text returned by handle
 }
 
+bool App::Impl::clip_spec(const json& j, const VideoFormat& fmt, EndAction default_end, double default_hold_s, ClipSpec& c, std::string& error) {
+    const std::string id = j.value("item_id", j.value("item", ""));
+    if (id.empty() || !library.exists(id)) {
+        error = "unknown item " + id;
+        return false;
+    }
+    const auto item = library.get(id);
+    const double fps = fmt.frame_rate.to_double();
+    auto frames_of = [&](const char* sec_key, const char* frame_key) -> std::int64_t {
+        if (j.contains(frame_key) && j.at(frame_key).is_number()) return std::max<std::int64_t>(0, j.at(frame_key).get<std::int64_t>());
+        if (j.contains(sec_key) && j.at(sec_key).is_number()) return std::max<std::int64_t>(0, std::llround(j.at(sec_key).get<double>() * fps));
+        return 0;
+    };
+    c = ClipSpec{};
+    c.item_id = id;
+    c.name = item.name;
+    c.type = item.type == ItemType::Still ? "still" : item.type == ItemType::Sprite ? "sprite" : "video";
+    c.in = frames_of("in_s", "in");
+    c.out = frames_of("out_s", "out");
+    if (c.out > 0 && c.out <= c.in) {
+        error = "the out point must be after the in point";
+        return false;
+    }
+    const double hold_s = j.contains("hold_s") && j.at("hold_s").is_number() ? j.at("hold_s").get<double>() : default_hold_s;
+    if (c.type == "still") c.hold_frames = hold_s > 0 ? std::max<std::int64_t>(1, std::llround(hold_s * fps)) : 0;
+    c.end = parse_end_action(j.value("end", ""), default_end);
+    c.transition = parse_transition(j.value("transition", ""), TransitionKind::Cut);
+    c.transition_frames = j.contains("transition_frames") && j.at("transition_frames").is_number() ? std::max(0, j.at("transition_frames").get<int>())
+                                                                                                      : (c.transition == TransitionKind::Cut ? 0 : 12);
+    c.entry_id = j.value("id", "");
+    const auto conv = item.conversions.value(fmt.name, json::object());
+    c.frames_hint = item.type == ItemType::Sprite ? conv.value("clip_frames", std::int64_t{0}) : conv.value("frames", std::int64_t{0});
+    return true;
+}
+
+std::shared_ptr<PlaylistContext> App::Impl::playlist_context(const std::string& id, const VideoFormat& fmt, std::string& error) {
+    json pl;
+    {
+        std::lock_guard lock(lists_mu);
+        for (const auto& p : playlists)
+            if (p.value("id", "") == id) pl = p;
+    }
+    if (pl.is_null()) {
+        error = "unknown playlist " + id;
+        return nullptr;
+    }
+    auto ctx = std::make_shared<PlaylistContext>();
+    ctx->id = id;
+    ctx->name = pl.value("name", "");
+    ctx->loop = pl.value("loop", false);
+    // Entries whose item was deleted are left out.
+    for (const auto& e : pl.value("entries", json::array())) {
+        ClipSpec c;
+        std::string err;
+        if (!clip_spec(e, fmt, EndAction::Next, 5.0, c, err)) continue;
+        c.entry = static_cast<int>(ctx->entries.size());
+        ctx->entries.push_back(std::move(c));
+    }
+    if (ctx->entries.empty()) {
+        error = "playlist " + ctx->name + " has no items in the library";
+        return nullptr;
+    }
+    return ctx;
+}
+
+void App::Impl::playout_action(Output& o, const json& b, HttpResponse& res) {
+    auto answer = [&](const json& j, int status = 200) {
+        res.status = status;
+        res.set_text(j.dump());
+    };
+    const std::string action = b.value("action", "");
+    const VideoFormat fmt = o.format();
+    std::optional<TransitionKind> kind;
+    std::optional<int> frames;
+    if (b.contains("transition") && b.at("transition").is_string()) kind = parse_transition(b.at("transition").get<std::string>(), TransitionKind::Cut);
+    if (b.contains("transition_frames") && b.at("transition_frames").is_number()) frames = std::max(0, b.at("transition_frames").get<int>());
+    std::string error;
+    // An entry of a playlist by index or by entry id.
+    auto entry_index = [&](const PlaylistContext& ctx) -> int {
+        if (b.contains("entry_id") && b.at("entry_id").is_string()) {
+            for (const auto& e : ctx.entries)
+                if (e.entry_id == b.at("entry_id").get<std::string>()) return e.entry;
+            return -1;
+        }
+        return b.value("entry", 0);
+    };
+    bool ok = true;
+    if (action == "cue") {
+        const bool take = b.value("take", false);
+        const std::string pl = b.value("playlist_id", b.value("playlist", ""));
+        if (!pl.empty()) {
+            auto ctx = playlist_context(pl, fmt, error);
+            if (!ctx) return answer(json{{"error", error}}, 404);
+            const int i = entry_index(*ctx);
+            if (i < 0 || i >= static_cast<int>(ctx->entries.size())) return answer(json{{"error", "no such entry"}}, 404);
+            o.playout([&](Playout& p, std::int64_t now) {
+                p.cue(ctx->entries[static_cast<std::size_t>(i)], ctx, now);
+                if (take) p.take(now, kind, frames);
+                return true;
+            });
+        } else {
+            ClipSpec c;
+            if (!clip_spec(b, fmt, EndAction::Stop, 0.0, c, error)) return answer(json{{"error", error}}, 404);
+            o.playout([&](Playout& p, std::int64_t now) {
+                p.cue(c, nullptr, now);
+                if (take) p.take(now, kind, frames);
+                return true;
+            });
+        }
+    } else if (action == "take") {
+        ok = o.playout([&](Playout& p, std::int64_t now) { return p.take(now, kind, frames); });
+        if (!ok) error = "nothing to take: cue a clip or a playlist first";
+    } else if (action == "pause") {
+        ok = o.playout([&](Playout& p, std::int64_t now) { return p.pause(now); });
+        if (!ok) error = "nothing is playing";
+    } else if (action == "resume" || action == "play") {
+        ok = o.playout([&](Playout& p, std::int64_t now) { return p.resume(now) || p.take(now); });
+        if (!ok) error = "nothing to resume";
+    } else if (action == "stop") {
+        o.playout([&](Playout& p, std::int64_t now) {
+            p.stop(now, kind.value_or(TransitionKind::Cut), frames.value_or(0));
+            return true;
+        });
+    } else if (action == "clear") {
+        o.playout([&](Playout& p, std::int64_t) {
+            p.clear_next();
+            return true;
+        });
+    } else if (action == "seek") {
+        const double fps = fmt.frame_rate.to_double();
+        std::int64_t frame = b.contains("seconds") && b.at("seconds").is_number() ? std::llround(b.at("seconds").get<double>() * fps) : b.value("frame", std::int64_t{0});
+        ok = o.playout([&](Playout& p, std::int64_t now) { return p.seek(now, frame); });
+        if (!ok) error = "nothing on air";
+    } else if (action == "jump" || action == "cue_entry") {
+        std::shared_ptr<PlaylistContext> ctx;
+        const std::string pl = b.value("playlist_id", "");
+        if (!pl.empty()) {
+            ctx = playlist_context(pl, fmt, error);
+            if (!ctx) return answer(json{{"error", error}}, 404);
+        } else {
+            // The playlist on air: its entries as they were cued.
+            const auto st = o.status();
+            const auto& po = st.value("playout", json::object());
+            std::string on_air;
+            for (const char* k : {"incoming", "program", "next"})
+                if (po.contains(k) && po.at(k).is_object() && !po.at(k).value("playlist_id", "").empty()) {
+                    on_air = po.at(k).value("playlist_id", "");
+                    break;
+                }
+            if (on_air.empty()) return answer(json{{"error", "no playlist on air: name playlist_id"}}, 409);
+            ctx = playlist_context(on_air, fmt, error);
+            if (!ctx) return answer(json{{"error", error}}, 404);
+        }
+        const int i = entry_index(*ctx);
+        ok = o.playout([&](Playout& p, std::int64_t now) { return p.jump(i, ctx, now); });
+        if (!ok) error = "no such entry";
+    } else {
+        return answer(json{{"error", "action must be cue, take, pause, resume, stop, clear, seek or jump"}}, 400);
+    }
+    if (!ok) return answer(json{{"error", error}}, 409);
+    answer(o.status());
+}
+
 void App::Impl::handle(const HttpRequest& req, HttpResponse& res) {
     if (widget_path(req.path)) {
         // The widget page is the UI's index.html; main.js mounts the widget for /widget/ paths.
         std::ifstream in(fs::path(web_root) / "index.html", std::ios::binary);
         std::string page(std::istreambuf_iterator<char>(in), {});
-        widget_response(cfg, req, page.empty() ? "<!doctype html><title>mxl-test-player</title><p>The web UI was not found.</p>" : page, res);
+        widget_response(cfg, req, page.empty() ? "<!doctype html><title>lm-mxl-playout</title><p>The web UI was not found.</p>" : page, res);
         return;
     }
     if (req.method == "OPTIONS") {
@@ -397,12 +608,19 @@ void App::Impl::handle(const HttpRequest& req, HttpResponse& res) {
                                                                   {"master_video", st["master_video"]},
                                                                   {"master_audio", st["master_audio"]},
                                                                   {"master_data", st["master_data"]},
-                                                                  {"master_key", st["master_key"]}});
+                                                                  {"master_key", st["master_key"]},
+                                                                  {"cue_mode", st.contains("playout") ? st["playout"].value("cue_mode", "park") : "park"}});
                                           }
                                           return arr;
                                       }()},
-                                      {"presets", presets},
-                                      {"playlists", playlists}}}});
+                                      {"presets", [&] {
+                                          std::lock_guard lock(lists_mu);
+                                          return json(presets);
+                                      }()},
+                                      {"playlists", [&] {
+                                          std::lock_guard lock(lists_mu);
+                                          return json(playlists);
+                                      }()}}}});
             return;
         }
         if (path == "/api/v1/config/import" && req.method == "POST") {
@@ -412,8 +630,6 @@ void App::Impl::handle(const HttpRequest& req, HttpResponse& res) {
                 std::ofstream f(cfg.state_path);
                 f << state.dump(2);
             }
-            if (state.contains("presets")) presets = state.at("presets").get<std::vector<json>>();
-            if (state.contains("playlists")) playlists = state.at("playlists").get<std::vector<json>>();
             load_state();
             save_state();
             text(json{{"ok", true}});
@@ -464,10 +680,23 @@ void App::Impl::handle(const HttpRequest& req, HttpResponse& res) {
                 return;
             }
             if (leaf.empty() && (req.method == "PATCH" || req.method == "PUT")) {
-                o->patch(body_json());
+                const auto b = body_json();
+                if (b.contains("cue_mode")) {
+                    const auto m = b.at("cue_mode").get<std::string>();
+                    if (m != "park" && m != "background") {
+                        text(json{{"error", "cue_mode must be park or background"}}, 400);
+                        return;
+                    }
+                    o->set_cue_mode(parse_cue_mode(m, CueMode::Park));
+                }
+                o->patch(b);
                 refresh_nmos();
                 save_state();
                 text(o->status());
+                return;
+            }
+            if (leaf == "playout" && req.method == "POST") {
+                playout_action(*o, body_json(), res);
                 return;
             }
             if (leaf == "transport" && req.method == "POST") {
@@ -721,39 +950,56 @@ void App::Impl::handle(const HttpRequest& req, HttpResponse& res) {
             return;
         }
         if (path == "/api/v1/playlists" && req.method == "GET") {
+            std::lock_guard lock(lists_mu);
             text(playlists);
             return;
         }
         if (path == "/api/v1/playlists" && req.method == "POST") {
-            auto b = body_json();
-            if (!b.contains("id")) b["id"] = uuid_v5(node, std::to_string(playlists.size()) + b.value("name", "pl")).str();
-            playlists.push_back(b);
+            auto b = normalize_playlist(body_json(), node);
+            {
+                std::lock_guard lock(lists_mu);
+                if (!b.contains("id")) b["id"] = new_entry_id(node);
+                playlists.push_back(b);
+            }
             save_state();
             text(b, 201);
             return;
         }
         if (path.rfind("/api/v1/playlists/", 0) == 0) {
             const auto id = path.substr(std::string("/api/v1/playlists/").size());
-            for (auto it = playlists.begin(); it != playlists.end(); ++it) {
-                if (it->value("id", "") != id) continue;
-                if (req.method == "DELETE") {
-                    playlists.erase(it);
-                    save_state();
-                    text(json{{"ok", true}});
-                    return;
+            json answer;
+            int status = 404;
+            {
+                std::lock_guard lock(lists_mu);
+                for (auto it = playlists.begin(); it != playlists.end(); ++it) {
+                    if (it->value("id", "") != id) continue;
+                    if (req.method == "DELETE") {
+                        playlists.erase(it);
+                        answer = json{{"ok", true}};
+                    } else if (req.method == "PUT" || req.method == "PATCH") {
+                        // PATCH changes the fields it names; PUT replaces the playlist.
+                        json b = body_json();
+                        if (req.method == "PATCH") {
+                            json merged = *it;
+                            for (auto& [k, v] : b.items()) merged[k] = v;
+                            b = merged;
+                        }
+                        b["id"] = id;
+                        *it = normalize_playlist(b, node);
+                        answer = *it;
+                    } else {
+                        answer = *it;
+                    }
+                    status = 200;
+                    break;
                 }
-                if (req.method == "PUT" || req.method == "PATCH") {
-                    auto b = body_json();
-                    b["id"] = id;
-                    *it = b;
-                    save_state();
-                    text(b);
-                    return;
-                }
-                text(*it);
+            }
+            if (status == 404) {
+                text(json{{"error", "not found"}}, 404);
                 return;
             }
-            text(json{{"error", "not found"}}, 404);
+            if (req.method != "GET") save_state();
+            text(answer);
             return;
         }
         if (path == "/api/v1/nmos" && req.method == "GET") {
@@ -801,8 +1047,8 @@ App::App(Config cfg) : impl_(new Impl(std::move(cfg))) {
     impl_->domain_id = impl_->cfg.mxl_domain_id.empty() ? domain_id_from_seed(impl_->cfg.nmos_seed).str() : impl_->cfg.mxl_domain_id;
     if (impl_->cfg.font_dir.empty()) {
         if (fs::exists("assets/fonts/DejaVuSans.ttf")) impl_->cfg.font_dir = "assets/fonts";
-        else if (fs::exists("/usr/local/share/mxl-test-player/fonts/DejaVuSans.ttf"))
-            impl_->cfg.font_dir = "/usr/local/share/mxl-test-player/fonts";
+        else if (fs::exists("/usr/local/share/lm-mxl-playout/fonts/DejaVuSans.ttf"))
+            impl_->cfg.font_dir = "/usr/local/share/lm-mxl-playout/fonts";
         else impl_->cfg.font_dir = "assets/fonts";
     }
     impl_->web_root = find_web_root(impl_->cfg);

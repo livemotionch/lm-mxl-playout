@@ -64,8 +64,8 @@ std::string ensure_output_domain(const std::string& domain_dir, const std::strin
         std::ofstream out(def_path);
         // BCP-007-03 requires id, label, description and tags.
         out << nlohmann::json{{"id", domain_id},
-                              {"label", "MXL Test Player"},
-                              {"description", "Output domain of mxl-test-player"},
+                              {"label", "MXL Playout"},
+                              {"description", "Output domain of lm-mxl-playout"},
                               {"tags", nlohmann::json::object()}}
                    .dump(2)
             << "\n";

@@ -106,7 +106,7 @@ nlohmann::json nmos_device_json(const NmosModel& m, const std::string& version) 
     return {{"id", m.device_id},
             {"version", version},
             {"label", m.label},
-            {"description", "MXL Test Player"},
+            {"description", "MXL Playout"},
             {"tags", m.tags},
             {"type", "urn:x-nmos:device:generic"},
             {"node_id", m.node_id},

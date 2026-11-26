@@ -6,7 +6,7 @@ import { api, canon, clone, formatFps, patternLabel, signalLabel } from "./api.j
 
 function storedOutput() {
   try {
-    return Number(localStorage.getItem("mxl-test-player.output")) || 0;
+    return Number(localStorage.getItem("lm-mxl-playout.output")) || 0;
   } catch {
     return 0;
   }
@@ -46,7 +46,7 @@ export function sourceText(o) {
 export function selectOutput(index) {
   live.selected = index;
   try {
-    localStorage.setItem("mxl-test-player.output", String(index));
+    localStorage.setItem("lm-mxl-playout.output", String(index));
   } catch {
     /* kept for this tab only */
   }

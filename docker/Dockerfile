@@ -39,16 +39,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
          useradd --uid 1000 --no-create-home --shell /usr/sbin/nologin mxl; \
        fi
 
-COPY --from=build /tmp/build/mxl-test-player /usr/local/bin/mxl-test-player
-COPY --from=build /src/web/dist /usr/local/share/mxl-test-player/web
-COPY --from=build /src/assets/fonts /usr/local/share/mxl-test-player/fonts
+COPY --from=build /tmp/build/lm-mxl-playout /usr/local/bin/lm-mxl-playout
+COPY --from=build /src/web/dist /usr/local/share/lm-mxl-playout/web
+COPY --from=build /src/assets/fonts /usr/local/share/lm-mxl-playout/fonts
 
-ENV PLAYER_WEB_ROOT=/usr/local/share/mxl-test-player/web \
-    PLAYER_FONT_DIR=/usr/local/share/mxl-test-player/fonts
+ENV PLAYER_WEB_ROOT=/usr/local/share/lm-mxl-playout/web \
+    PLAYER_FONT_DIR=/usr/local/share/lm-mxl-playout/fonts
 LABEL io.dmf.mxl.revision="${MXL_REF}"
-LABEL org.opencontainers.image.title="mxl-test-player"
-LABEL org.opencontainers.image.description="MXL test and demo source"
+LABEL org.opencontainers.image.title="lm-mxl-playout"
+LABEL org.opencontainers.image.description="MXL media playout: clips and playlists, cue and take, cut/mix/dip"
 LABEL org.opencontainers.image.licenses="MIT"
 USER 1000:1000
 EXPOSE 8130/tcp 3282/tcp
-ENTRYPOINT ["/usr/local/bin/mxl-test-player"]
+ENTRYPOINT ["/usr/local/bin/lm-mxl-playout"]

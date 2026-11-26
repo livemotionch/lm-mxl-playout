@@ -48,8 +48,8 @@ jobs:
           flavor: |
             latest=false
           labels: |
-            org.opencontainers.image.title=mxl-test-player
-            org.opencontainers.image.description=MXL test and demo source
+            org.opencontainers.image.title=lm-mxl-playout
+            org.opencontainers.image.description=MXL media playout: clips and playlists, cue and take, cut/mix/dip
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
             org.opencontainers.image.revision=${{ github.sha }}
             org.opencontainers.image.licenses=MIT

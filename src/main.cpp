@@ -20,7 +20,7 @@ int main(int argc, char** argv) {
     for (int i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "--config") == 0 && i + 1 < argc) config_path = argv[++i];
         else if (std::strcmp(argv[i], "--help") == 0) {
-            std::fprintf(stdout, "mxl-test-player [--config file]\n");
+            std::fprintf(stdout, "lm-mxl-playout [--config file]\n");
             return 0;
         }
     }

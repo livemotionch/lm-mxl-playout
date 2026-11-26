@@ -84,6 +84,12 @@ void StreamDecoder::prime(const std::shared_ptr<const void>& owner, const std::s
     cv_.notify_one();
 }
 
+bool StreamDecoder::has(const std::shared_ptr<const void>& owner, std::int64_t frame) {
+    std::lock_guard lock(mu_);
+    if (owner_ != owner) return false;
+    return std::any_of(window_.begin(), window_.end(), [&](const Frame& f) { return f.frame == frame; });
+}
+
 void StreamDecoder::release() {
     std::lock_guard lock(mu_);
     bind(nullptr, std::string(), 0, 1, false);

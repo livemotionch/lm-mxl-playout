@@ -145,7 +145,7 @@ const seed = computed(() => settings.value.find((s) => s.key === "NMOS_SEED")?.v
         <span class="spacer"></span>
         <button class="btn secondary" @click="load">Reload</button>
         <button class="btn secondary" :disabled="!exportDoc" @click="copy">Copy</button>
-        <button class="btn" :disabled="!exportDoc" @click="download(`mxl-test-player-${seed}.json`, exportDoc + '\n')">Download</button>
+        <button class="btn" :disabled="!exportDoc" @click="download(`lm-mxl-playout-${seed}.json`, exportDoc + '\n')">Download</button>
       </div>
       <pre style="max-height: 320px">{{ exportDoc }}</pre>
     </div>

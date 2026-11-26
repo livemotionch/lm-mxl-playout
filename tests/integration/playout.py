@@ -1,0 +1,288 @@
+#!/usr/bin/env python3
+"""CPU integration of the playout: park and take, a playlist with a cut and with a mix, from RAM and
+streamed from the mezzanine. Reads the written grains back (centre pixel luma) and checks that the
+clips follow each other frame-accurately: no black and no repeated frame at a cut, a monotonic mix.
+
+PLAYOUT_STREAM=1 plays every clip from its mezzanine (PLAYER_RAM_CLIP_MAX_S=0)."""
+
+import ctypes
+import json
+import os
+import subprocess
+import sys
+import time
+import urllib.error
+import urllib.request
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[2]
+BIN = ROOT / "build" / "lm-mxl-playout"
+BASE = os.environ.get("PLAYER_BASE", "http://127.0.0.1:18140")
+PORT = int(BASE.rsplit(":", 1)[-1])
+STREAM = os.environ.get("PLAYOUT_STREAM") == "1"
+FPS = 25
+
+
+def http(method, path, body=None, raw=None, timeout=60):
+    data = raw if raw is not None else (None if body is None else json.dumps(body).encode())
+    headers = {"Content-Type": "application/json"} if body is not None else {}
+    req = urllib.request.Request(BASE + path, data=data, headers=headers, method=method)
+    with urllib.request.urlopen(req, timeout=timeout) as res:
+        raw_body = res.read()
+        if res.headers.get("Content-Type", "").startswith("application/json"):
+            return json.loads(raw_body) if raw_body else None
+        return raw_body
+
+
+libc = ctypes.CDLL(None)
+
+
+class Ts(ctypes.Structure):
+    _fields_ = [("sec", ctypes.c_long), ("nsec", ctypes.c_long)]
+
+
+def tai_index():
+    t = Ts()
+    libc.clock_gettime(11, ctypes.byref(t))  # CLOCK_TAI
+    return (t.sec * 10**9 + t.nsec) * FPS // 10**9
+
+
+def make_clip(path, colour, seconds):
+    subprocess.check_call(
+        ["ffmpeg", "-hide_banner", "-y",
+         "-f", "lavfi", "-i", f"color=c={colour}:s=320x180:r={FPS}:d={seconds}",
+         "-f", "lavfi", "-i", f"sine=frequency=1000:duration={seconds}:sample_rate=48000",
+         "-c:v", "libx264", "-pix_fmt", "yuv420p", "-g", "1", "-c:a", "aac", "-ac", "2", str(path)],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+def upload(path):
+    meta = http("POST", "/api/v1/uploads", {"name": path.name, "size": path.stat().st_size, "options": {"fit": "fill"}})
+    http("PUT", f"/api/v1/uploads/{meta['id']}/chunks/0", raw=path.read_bytes())
+    item = http("POST", f"/api/v1/uploads/{meta['id']}/complete", {})
+    deadline = time.time() + 120
+    while time.time() < deadline:
+        item = http("GET", f"/api/v1/library/{item['id']}")
+        conv = item["conversions"].get("720p25", {})
+        if conv.get("status") == "ready":
+            return item
+        if conv.get("status") == "failed":
+            raise SystemExit(f"conversion failed: {conv}")
+        time.sleep(0.3)
+    raise SystemExit("conversion timeout")
+
+
+def playout(body, expect=200):
+    try:
+        return http("POST", "/api/v1/outputs/0/playout", body)
+    except urllib.error.HTTPError as e:
+        if e.code == expect:
+            return json.loads(e.read())
+        raise SystemExit(f"{body}: HTTP {e.code} {e.read()!r}")
+
+
+def lumas(first, last):
+    """Centre luma of grains first..last (None when a grain could not be read)."""
+    out = []
+    for i in range(first, last + 1):
+        p = http("GET", f"/api/v1/outputs/0/probe?index={i}")
+        out.append(p["y"] if p["ok"] else None)
+    return out
+
+
+def classify(y, levels):
+    name, level = min(levels.items(), key=lambda kv: abs(kv[1] - y))
+    return name if abs(level - y) <= 12 else "mix"
+
+
+def from_first(seq, value):
+    """seq from the first `value` on, without black at its end."""
+    seq = seq[seq.index(value):]
+    while seq and seq[-1] == "black":
+        seq = seq[:-1]
+    return seq
+
+
+def runs(seq):
+    """[(value, count)] of consecutive equal values."""
+    out = []
+    for v in seq:
+        if out and out[-1][0] == v:
+            out[-1][1] += 1
+        else:
+            out.append([v, 1])
+    return [tuple(r) for r in out]
+
+
+def wait_state(want, timeout=10):
+    deadline = time.time() + timeout
+    st = None
+    while time.time() < deadline:
+        st = http("GET", "/api/v1/outputs/0")
+        if st["playout"]["state"] == want:
+            return st
+        time.sleep(0.05)
+    raise SystemExit(f"state {want} not reached: {st['playout'] if st else None}")
+
+
+def main():
+    work = Path("/tmp/lm-playout-int" + ("-stream" if STREAM else ""))
+    subprocess.call(["rm", "-rf", str(work)])
+    work.mkdir(parents=True)
+    a, b = work / "light.mp4", work / "dark.mp4"
+    make_clip(a, "0xB4B4B4", 1)
+    make_clip(b, "0x404040", 1)
+
+    env = os.environ.copy()
+    env.update({
+        "PLAYER_FORMAT": "720p25",
+        "PLAYER_OUTPUTS": "1",
+        "PLAYER_AUDIO_CHANNELS": "2",
+        "PLAYER_LIBRARY_DIR": str(work / "lib"),
+        "PLAYER_STATE": str(work / "state.json"),
+        "PLAYER_FONT_DIR": str(ROOT / "assets" / "fonts"),
+        "PLAYER_WEB_ROOT": str(ROOT / "web" / "dist"),
+        "PLAYER_RAM_CLIP_MAX_S": "0" if STREAM else "20",
+        "MXL_OUTPUT_DOMAIN_DIR": str(work / "domain"),
+        "MXL_HISTORY_DURATION_NS": "6000000000",  # grains stay readable for 6 s
+        "NMOS_SEED": "int-playout",
+        "WEB_PORT": str(PORT),
+        "NMOS_PORT": str(PORT + 1),
+    })
+    log = open(work / "player.log", "w")
+    proc = subprocess.Popen([str(BIN), "--config", str(work / "missing.json")], env=env, stdout=log, stderr=subprocess.STDOUT)
+    try:
+        deadline = time.time() + 10
+        while True:
+            try:
+                if http("GET", "/livez") == b"ok\n":
+                    break
+            except Exception:
+                pass
+            if time.time() > deadline:
+                raise SystemExit("player did not start")
+            time.sleep(0.1)
+
+        st = http("GET", "/api/v1/outputs/0")
+        assert st["source"]["type"] == "playout", st["source"]
+        assert st["playout"]["state"] == "idle", st["playout"]
+        assert not st["burnin"]["label"] and not st["burnin"]["timecode"], st["burnin"]
+        time.sleep(0.3)
+        black = http("GET", "/api/v1/outputs/0/probe")
+        assert black["ok"] and abs(black["y"] - 64) <= 2, black  # nothing on air: black, not bars
+
+        light = upload(a)
+        dark = upload(b)
+        assert light["conversions"]["720p25"]["frames"] == FPS
+
+        # Nothing to take yet.
+        playout({"action": "take"}, expect=409)
+
+        # Park and take: the cued clip stands at its first frame, the take rolls it.
+        st = playout({"action": "cue", "item_id": light["id"], "end": "hold"})
+        assert st["playout"]["state"] == "parked", st["playout"]
+        time.sleep(0.6)
+        st = http("GET", "/api/v1/outputs/0")
+        assert st["playout"]["program"]["ready"] and st["playout"]["program"]["position"] == 0, st["playout"]
+        levels = {"black": 64, "light": http("GET", "/api/v1/outputs/0/probe")["y"]}
+        assert levels["light"] > 500, levels
+        playout({"action": "take"})
+        st = wait_state("ended", timeout=4)
+        assert st["playout"]["program"]["position"] == FPS - 1, st["playout"]
+        playout({"action": "stop"})
+        wait_state("idle")
+
+        # Learn the dark level.
+        playout({"action": "cue", "item_id": dark["id"], "end": "hold"})
+        time.sleep(0.6)
+        levels["dark"] = http("GET", "/api/v1/outputs/0/probe")["y"]
+        playout({"action": "stop"})
+        assert 150 < levels["dark"] < 400, levels
+        print("levels", levels)
+
+        # From here on a cue waits in the background (preloaded) until the take.
+        st = http("PATCH", "/api/v1/outputs/0", {"cue_mode": "background"})
+        assert st["playout"]["cue_mode"] == "background", st["playout"]
+
+        # A playlist with a cut: 25 light frames, then 25 dark ones, then black. Nothing missing.
+        cut = http("POST", "/api/v1/playlists", {"name": "cut", "entries": [
+            {"item_id": light["id"], "end": "next"},
+            {"item_id": dark["id"], "end": "stop"}]})
+        assert all(e.get("id") for e in cut["entries"]), cut
+        playout({"action": "cue", "playlist_id": cut["id"]})  # background: preloaded, air stays black
+        time.sleep(0.6)
+        assert http("GET", "/api/v1/outputs/0")["playout"]["next"]["ready"]
+        start = tai_index()
+        playout({"action": "take"})
+        time.sleep(2.6)
+        seq = [classify(y, levels) if y is not None else "none" for y in lumas(start - 2, start + 70)]
+        r = runs(seq)
+        print("cut", r, "missed", http("GET", "/api/v1/outputs/0")["stream_missed"])
+        assert runs(from_first(seq, "light")) == [("light", FPS), ("dark", FPS)], r
+        assert r[-1][0] == "black", r
+
+        # A mix of 10 frames into the second clip: it starts 10 frames before the first ends.
+        mix = http("POST", "/api/v1/playlists", {"name": "mix", "entries": [
+            {"item_id": light["id"], "end": "next"},
+            {"item_id": dark["id"], "end": "stop", "transition": "mix", "transition_frames": 10}]})
+        playout({"action": "cue", "playlist_id": mix["id"]})  # background: preloaded, air stays black
+        time.sleep(0.6)
+        assert http("GET", "/api/v1/outputs/0")["playout"]["next"]["ready"]
+        start = tai_index()
+        playout({"action": "take"})
+        time.sleep(2.4)
+        ys = lumas(start - 2, start + 60)
+        seq = [classify(y, levels) if y is not None else "none" for y in ys]
+        r = runs(seq)
+        print("mix", r, "missed", http("GET", "/api/v1/outputs/0")["stream_missed"])
+        assert runs(from_first(seq, "light")) == [("light", FPS - 10), ("mix", 10), ("dark", FPS - 10)], r
+        mixed = [y for y, c in zip(ys, seq) if c == "mix"]
+        assert all(x > y for x, y in zip(mixed, mixed[1:])), mixed  # light to dark: falling
+
+        # A dip of 10 frames: down to black, then up; the dark clip starts at the middle.
+        dip = http("POST", "/api/v1/playlists", {"name": "dip", "entries": [
+            {"item_id": light["id"], "end": "next"},
+            {"item_id": dark["id"], "end": "stop", "transition": "dip", "transition_frames": 10}]})
+        playout({"action": "cue", "playlist_id": dip["id"]})  # background: preloaded, air stays black
+        time.sleep(0.6)
+        assert http("GET", "/api/v1/outputs/0")["playout"]["next"]["ready"]
+        start = tai_index()
+        playout({"action": "take"})
+        time.sleep(2.4)
+        ys = lumas(start - 2, start + 60)
+        seq = [classify(y, levels) if y is not None else "none" for y in ys]
+        r = runs(seq)
+        print("dip", r, "missed", http("GET", "/api/v1/outputs/0")["stream_missed"])
+        first = seq.index("light")
+        last = max(i for i, c in enumerate(seq) if c == "dark")
+        core = seq[first:last + 1]
+        assert runs(core)[0] == ("light", FPS - 10), r
+        between = [i for i in range(first, last + 1) if seq[i] not in ("light", "dark")]
+        assert len(between) == 10 and between == list(range(between[0], between[0] + 10)), r
+        assert min(ys[i] for i in between) <= levels["black"] + 40, [ys[i] for i in between]
+        assert runs(core)[-1] == ("dark", FPS - 5), r  # dark rolls from the dip's middle
+
+        # Stop with a fade, then the status says idle; the API refuses an unknown action.
+        playout({"action": "cue", "item_id": light["id"], "end": "loop", "take": True})
+        time.sleep(0.5)
+        playout({"action": "stop", "transition": "mix", "transition_frames": 12})
+        wait_state("idle", timeout=3)
+        playout({"action": "bogus"}, expect=400)
+
+        st = http("GET", "/api/v1/outputs/0")
+        print("underruns", st["underruns"], "stream_missed", st["stream_missed"])
+        assert st["stream_missed"] == 0, st["stream_missed"]
+        print("playout integration OK" + (" (streamed)" if STREAM else ""))
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=15)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+        log.close()
+        if proc.returncode not in (0, 143, -15):
+            print((work / "player.log").read_text()[-4000:], file=sys.stderr)
+
+
+if __name__ == "__main__":
+    main()

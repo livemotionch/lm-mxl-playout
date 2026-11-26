@@ -23,7 +23,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import registry_stub  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[2]
-BIN = ROOT / "build" / "mxl-test-player"
+BIN = ROOT / "build" / "lm-mxl-playout"
 WEB = 18430
 NMOS = 18482
 REG = 18510

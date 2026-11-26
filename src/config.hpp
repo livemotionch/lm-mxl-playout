@@ -124,7 +124,7 @@ struct Config {
     bool nmos_dns_sd = false;
     int nmos_port = 3282;
     std::string nmos_seed;
-    std::string nmos_label = "MXL Test Player";
+    std::string nmos_label = "MXL Playout";
     nlohmann::json nmos_tags = nlohmann::json::object();
     std::string nmos_host_address;
     int shutdown_timeout_s = 10;

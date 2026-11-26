@@ -116,6 +116,8 @@ private:
     // The playout's layers (program, incoming, next) and their media; mu_ held.
     void sync_layers();
     std::int64_t frame_now() const;  // the output frame on the TAI timeline now
+    // The frame a command takes effect at: the next one the writer writes (mu_ held).
+    std::int64_t command_frame() const;
     struct FlowDefs {
         std::string video, audio, data, key;  // empty when the flow is off
     };
@@ -184,6 +186,9 @@ private:
         bool load = true;    // (re)load it: new, or its item was not ready
         int decoder = -1;    // the stream it decodes on (a streamed video)
         int order = 0;       // 0 program, then incoming, then next: the loader loads in this order
+        // The playout was told it is ready: when loaded, or for a streamed video once its stream
+        // holds its first frame (so a take never cuts to a frame that is not decoded).
+        bool signalled = false;
     };
     std::map<int, LayerMedia> layers_;
     std::vector<std::shared_ptr<const Media>> layer_graveyard_;  // freed by the loader

@@ -11,7 +11,7 @@ import urllib.request
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
-BIN = ROOT / "build" / "mxl-test-player"
+BIN = ROOT / "build" / "lm-mxl-playout"
 BASE = os.environ.get("PLAYER_BASE", "http://127.0.0.1:18130")
 PORT = int(BASE.rsplit(":", 1)[-1])
 

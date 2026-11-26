@@ -123,6 +123,7 @@ public:
     PlayoutFrame tick(std::int64_t abs);
 
     std::vector<LayerRef> layers() const;
+    std::int64_t last_tick() const { return last_tick_; }
     bool idle() const { return !program_ && !incoming_ && !next_; }
     // The state, positions and countdowns at frame `abs` (`fps` output frames per second).
     nlohmann::json status(std::int64_t abs, double fps) const;

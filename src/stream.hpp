@@ -48,6 +48,8 @@ public:
                bool wrap);
     // Lets go of the media.
     void release();
+    // The window holds `frame` of `owner` (a primed clip is ready to cut to).
+    bool has(const std::shared_ptr<const void>& owner, std::int64_t frame);
     const std::shared_ptr<const void>& owner() const { return owner_; }  // writer thread only
     const Frame& shown() const { return shown_; }  // writer thread only
     int ahead() const { return ahead_.load(); }
