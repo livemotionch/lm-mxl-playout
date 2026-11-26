@@ -2,6 +2,7 @@
 
 #include "audio.hpp"
 #include "format.hpp"
+#include "playout.hpp"
 #include "motion.hpp"
 #include "pattern.hpp"
 #include "timecode.hpp"
@@ -48,16 +49,18 @@ struct MovingBoxConfig {
     std::string color = "#FFCC00";
 };
 
+// Playout outputs go to air: no burn-in unless one is switched on (the test player had label,
+// timecode, frame counter, item and flow id on).
 struct BurnInConfig {
-    bool label = true;
+    bool label = false;
     std::string label_anchor = "tl";
-    bool timecode = true;
+    bool timecode = false;
     bool utc_clock = false;
     bool local_clock = false;
-    bool frame_counter = true;
+    bool frame_counter = false;
     bool frame_counter_absolute = true;
-    bool item = true;
-    bool flow_id = true;
+    bool item = false;
+    bool flow_id = false;
     bool on_keyed_stills = false;
     std::vector<TextLayerConfig> texts;
     std::vector<MovingBoxConfig> boxes;  // up to 2
@@ -81,6 +84,10 @@ struct OutputConfig {
     IdleKey idle_key = IdleKey::Opaque;
     PauseAudio pause_audio = PauseAudio::Silence;
     bool loop = true;
+    // Playout: a clip cued while nothing is on air is parked on air (park) or waits for the take
+    // (background). PLAYER_CUE_MODE, or "cue_mode" per output in the configuration file.
+    CueMode cue_mode = CueMode::Park;
+    bool cue_mode_set = false;  // set per output (else PLAYER_CUE_MODE applies)
     BurnInConfig burnin;
 };
 
@@ -103,6 +110,7 @@ struct Config {
     double ram_clip_max_s = 20;
     int ram_budget_mb = 4096;
     int preroll_frames = 25;
+    CueMode cue_mode = CueMode::Park;
     std::string config_dir = "/config";
     std::string mxl_scan_path = "/Volumes/mxl";
     std::string mxl_domain_dir;

@@ -159,6 +159,12 @@ OutputConfig output_from_json(const json& j, int index) {
         o.pause_audio = (s == "hold" || s == "hold_tone") ? PauseAudio::HoldTone : PauseAudio::Silence;
     }
     if (j.contains("loop")) o.loop = j.at("loop").get<bool>();
+    if (j.contains("cue_mode")) {
+        const auto s = j.at("cue_mode").get<std::string>();
+        if (s != "park" && s != "background") throw ConfigError("cue_mode must be park or background");
+        o.cue_mode = parse_cue_mode(s, CueMode::Park);
+        o.cue_mode_set = true;
+    }
     if (j.contains("burnin")) o.burnin = parse_burnin(j.at("burnin"));
     return o;
 }
@@ -184,6 +190,7 @@ void validate(Config& c) {
         c.output_configs.push_back(o);
     }
     for (auto& o : c.output_configs) {
+        if (!o.cue_mode_set) o.cue_mode = c.cue_mode;
         if (o.audio_channels == 0) o.audio_channels = c.audio_channels;
         if (o.audio_channels < 2 || o.audio_channels > 64) throw ConfigError("output audio_channels must be 2..64");
         if (!o.format.empty() && !parse_format(o.format)) throw ConfigError("invalid output format " + o.format);
@@ -419,6 +426,11 @@ Config load_config(const std::string& file_path, const char* const* envp) {
     c.ram_clip_max_s = pick_dbl("PLAYER_RAM_CLIP_MAX_S", "ram_clip_max_s", 20);
     c.ram_budget_mb = pick_int("PLAYER_RAM_BUDGET_MB", "ram_budget_mb", 4096);
     c.preroll_frames = pick_int("PLAYER_PREROLL_FRAMES", "preroll_frames", 25);
+    {
+        const auto cue = pick_str("PLAYER_CUE_MODE", "cue_mode", "park");
+        if (cue != "park" && cue != "background") throw ConfigError("PLAYER_CUE_MODE must be park or background");
+        c.cue_mode = parse_cue_mode(cue, CueMode::Park);
+    }
     c.mxl_scan_path = pick_str("MXL_DOMAIN_SCAN_PATH", "mxl_scan_path", "/Volumes/mxl");
     c.mxl_domain_dir = pick_str("MXL_OUTPUT_DOMAIN_DIR", "mxl_domain_dir", "");
     c.mxl_domain_id = pick_str("MXL_OUTPUT_DOMAIN_ID", "mxl_domain_id", "");
@@ -521,6 +533,7 @@ Config load_config(const std::string& file_path, const char* const* envp) {
         {"PLAYER_RAM_CLIP_MAX_S", num(c.ram_clip_max_s)},
         {"PLAYER_RAM_BUDGET_MB", std::to_string(c.ram_budget_mb)},
         {"PLAYER_PREROLL_FRAMES", std::to_string(c.preroll_frames)},
+        {"PLAYER_CUE_MODE", cue_mode_name(c.cue_mode)},
         {"PLAYER_FONT_DIR", c.font_dir},
         {"PLAYER_WEB_ROOT", c.web_root},
         {"PLAYER_UPLOAD_LIMIT_GB", num(static_cast<double>(c.upload_limit_bytes) / static_cast<double>(1ull << 30))},

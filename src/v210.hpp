@@ -94,4 +94,12 @@ void restore_a10_rect(std::uint8_t* dst, const std::uint8_t* src, int width, int
 // A whole alpha plane at one value (0..1023).
 void fill_alpha10(std::uint8_t* dst, int width, int height, int a);
 
+// Transitions: dst = ref + ga * (a - ref) + gb * (b - ref) for every 10-bit sample, where ref is
+// black (luma `y_ref`, chroma `c_ref`) and a null `a` or `b` is ref. A mix is ga = 1 - t,
+// gb = t; a fade to black is gb = 0. `dst` may be `a` or `b`. `bytes` is a whole number of words.
+void mix_v210(std::uint8_t* dst, const std::uint8_t* a, const std::uint8_t* b, std::size_t bytes, double ga, double gb,
+              int y_ref = kYBlack, int c_ref = kCMid);
+// The same for a v210a alpha plane (three samples per word, all with the reference `ref`).
+void mix_a10(std::uint8_t* dst, const std::uint8_t* a, const std::uint8_t* b, std::size_t bytes, double ga, double gb, int ref);
+
 }  // namespace mtp

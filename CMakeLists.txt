@@ -130,6 +130,8 @@ set(PLAYER_SOURCES
     src/pattern.cpp
     src/motion.cpp
     src/playlist.cpp
+    src/playout.cpp
+    src/stream.cpp
     src/placeholders.cpp
     src/config.cpp
     src/ids.cpp
@@ -166,10 +168,11 @@ target_link_libraries(mxl-test-player PRIVATE player_core)
 target_compile_options(mxl-test-player PRIVATE -Wall -Wextra)
 
 if(PLAYER_BUILD_TESTS)
-    add_executable(player_tests tests/test_player.cpp)
+    add_executable(player_tests tests/test_player.cpp tests/test_playout.cpp)
     target_include_directories(player_tests PRIVATE third_party/doctest)
     target_link_libraries(player_tests PRIVATE player_core)
-    target_compile_definitions(player_tests PRIVATE DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN MTP_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
+    target_compile_definitions(player_tests PRIVATE MTP_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
+    set_source_files_properties(tests/test_player.cpp PROPERTIES COMPILE_DEFINITIONS DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN)
     # Lab tool of tests/integration/keying.py: one grain's payload as a reader gets it.
     add_executable(player_grain_dump tests/tools/grain_dump.cpp)
     target_link_libraries(player_grain_dump PRIVATE mxl::mxl)

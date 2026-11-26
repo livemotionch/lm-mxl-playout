@@ -6,6 +6,8 @@
 #include "media.hpp"
 #include "mxl_io.hpp"
 #include "playlist.hpp"
+#include "playout.hpp"
+#include "stream.hpp"
 
 #include <atomic>
 #include <condition_variable>
@@ -13,6 +15,7 @@
 #include <filesystem>
 #include <cstdint>
 #include <functional>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -22,7 +25,9 @@
 namespace mtp {
 
 struct SourceDesc {
-    std::string type = "pattern";
+    // pattern, video, still, playlist (the test player's sources) or playout (cue and take,
+    // Output::playout): the default.
+    std::string type = "playout";
     std::string pattern = "smpte_rp219";
     bool pluge = false;
     std::string audio = "sine";
@@ -52,6 +57,11 @@ public:
     void patch(const nlohmann::json& body);
     void seek(std::int64_t frame);
     void set_master(const std::string& sender_id, bool enabled);
+    // Runs a playout command (cue, take, ...) at the next output frame, under the output's lock,
+    // and switches the output to the playout source first. `fn` gets the frame the command takes
+    // effect at. Returns what `fn` returns.
+    bool playout(const std::function<bool(Playout&, std::int64_t now)>& fn);
+    void set_cue_mode(CueMode m);
     // The library changed (a conversion finished): media that was not ready is loaded again.
     void library_changed();
     std::vector<std::uint8_t> thumbnail() const;
@@ -102,17 +112,10 @@ private:
 
     void writer_main();
     void loader_main();
-    // Decode-ahead for a video that streams from its mezzanine (§7): the stream thread decodes the
-    // frames from the writer's playhead on into `stream_`; the writer takes the frame it shows.
-    struct StreamFrame {
-        std::int64_t frame = 0;
-        std::vector<std::uint8_t> v210;
-        std::vector<float> audio;  // the frame's samples, interleaved, `channels` per sample
-        int channels = 0;
-    };
-    void stream_main();
-    const StreamFrame* stream_take(const std::shared_ptr<const Media>& media, std::int64_t frame);
-    void stream_drop(std::size_t count);
+    bool load_layers(const VideoFormat& fmt, std::vector<std::shared_ptr<const Media>>& graveyard);
+    // The playout's layers (program, incoming, next) and their media; mu_ held.
+    void sync_layers();
+    std::int64_t frame_now() const;  // the output frame on the TAI timeline now
     struct FlowDefs {
         std::string video, audio, data, key;  // empty when the flow is off
     };
@@ -168,17 +171,22 @@ private:
     std::atomic<std::int64_t> length_{0};
     std::thread thread_;
     std::thread loader_;
-    std::thread streamer_;
+    // Two decode-ahead streams: the clip on air and the next (or the two clips of a transition).
+    // The test player's sources use the first.
+    std::unique_ptr<StreamDecoder> decoders_[2];
 
-    std::mutex stream_mu_;
-    std::condition_variable stream_cv_;
-    std::shared_ptr<const Media> stream_media_;  // the streaming media the writer plays
-    std::int64_t stream_want_ = 0;               // the frame the writer showed last
-    std::uint64_t stream_gen_ = 0;               // counts restarts of the window (a seek, new media)
-    std::deque<StreamFrame> stream_;
-    std::int64_t stream_last_ = -1;              // the frame stream_take returned last (still in `stream_`)
-    StreamFrame stream_shown_;                   // that frame once it left `stream_` (writer thread only)
-    std::vector<std::vector<std::uint8_t>> stream_pool_;  // frame buffers to reuse
+    // Playout (mu_): the state machine and the media of its layers by layer id.
+    Playout playout_;
+    struct LayerMedia {
+        ClipSpec spec;
+        std::int64_t preroll = 0;
+        std::shared_ptr<const Media> media;
+        bool load = true;    // (re)load it: new, or its item was not ready
+        int decoder = -1;    // the stream it decodes on (a streamed video)
+        int order = 0;       // 0 program, then incoming, then next: the loader loads in this order
+    };
+    std::map<int, LayerMedia> layers_;
+    std::vector<std::shared_ptr<const Media>> layer_graveyard_;  // freed by the loader
 
     MxlFlow video_, audio_, data_, key_;
     bool flows_open_ = false;

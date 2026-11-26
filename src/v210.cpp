@@ -3,6 +3,7 @@
 #include "util.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <cstring>
 
 namespace mtp {
@@ -393,6 +394,48 @@ void fill_alpha10(std::uint8_t* dst, int width, int height, int a) {
     std::vector<std::uint16_t> line(static_cast<std::size_t>(width), static_cast<std::uint16_t>(std::clamp(a, 0, 1023)));
     const std::uint32_t stride = alpha10_line_stride(width);
     for (int row = 0; row < height; ++row) pack_alpha10_line(line.data(), width, dst + static_cast<std::size_t>(row) * stride);
+}
+
+namespace {
+
+// refs[w % 4][field]: the reference of each 10-bit field of word w (v210 repeats every 4 words).
+template <int Lo, int Hi>
+void mix_words(std::uint8_t* dst, const std::uint8_t* a, const std::uint8_t* b, std::size_t bytes, double ga, double gb,
+               const int (&refs)[4][3]) {
+    const auto n = bytes / 4;
+    auto* d = reinterpret_cast<std::uint32_t*>(dst);
+    const auto* pa = reinterpret_cast<const std::uint32_t*>(a);
+    const auto* pb = reinterpret_cast<const std::uint32_t*>(b);
+    const std::int32_t GA = static_cast<std::int32_t>(std::lround(std::clamp(ga, 0.0, 1.0) * 4096));
+    const std::int32_t GB = static_cast<std::int32_t>(std::lround(std::clamp(gb, 0.0, 1.0) * 4096));
+    for (std::size_t w = 0; w < n; ++w) {
+        const auto& r = refs[w & 3u];
+        const std::uint32_t wa = pa ? pa[w] : 0, wb = pb ? pb[w] : 0;
+        std::uint32_t out = 0;
+        for (int f = 0; f < 3; ++f) {
+            const int shift = f * 10;
+            const std::int32_t ref = r[f];
+            const std::int32_t va = pa ? static_cast<std::int32_t>((wa >> shift) & 0x3FFu) : ref;
+            const std::int32_t vb = pb ? static_cast<std::int32_t>((wb >> shift) & 0x3FFu) : ref;
+            std::int32_t v = (ref * 4096 + GA * (va - ref) + GB * (vb - ref) + 2048) >> 12;
+            v = std::clamp(v, Lo, Hi);
+            out |= static_cast<std::uint32_t>(v) << shift;
+        }
+        d[w] = out;
+    }
+}
+
+}  // namespace
+
+void mix_v210(std::uint8_t* dst, const std::uint8_t* a, const std::uint8_t* b, std::size_t bytes, double ga, double gb, int y_ref, int c_ref) {
+    // Cb Y Cr | Y Cb Y | Cr Y Cb | Y Cr Y
+    const int refs[4][3] = {{c_ref, y_ref, c_ref}, {y_ref, c_ref, y_ref}, {c_ref, y_ref, c_ref}, {y_ref, c_ref, y_ref}};
+    mix_words<4, 1019>(dst, a, b, bytes, ga, gb, refs);
+}
+
+void mix_a10(std::uint8_t* dst, const std::uint8_t* a, const std::uint8_t* b, std::size_t bytes, double ga, double gb, int ref) {
+    const int refs[4][3] = {{ref, ref, ref}, {ref, ref, ref}, {ref, ref, ref}, {ref, ref, ref}};
+    mix_words<0, 1023>(dst, a, b, bytes, ga, gb, refs);
 }
 
 }  // namespace mtp
