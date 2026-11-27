@@ -1,25 +1,38 @@
-# mxl-test-player
+# lm-mxl-playout
 
-TAI-locked MXL test source. Each output writes a `video/v210` flow and an `audio/float32` flow (optional `video/smpte291` timecode and a fill/key pair) and publishes them as an NMOS sender group.
+MXL media playout. Operators upload clips, organise them into playlists and play out a single clip or a whole playlist, with cue and take, frame-accurate cuts, mixes and dips, countdowns and operator-screen widgets. Each output writes a `video/v210` flow and an `audio/float32` flow (optional `video/smpte291` timecode and a fill/key pair) and publishes them as an NMOS sender group.
 
-Part of [mxl-stack](https://github.com/LeeO86/mxl-stack), a collection of open-source MXL media functions with Docker Compose and Kubernetes examples.
+A Livemotion fork of [mxl-test-player](https://github.com/LeeO86/mxl-test-player) (part of [mxl-stack](https://github.com/LeeO86/mxl-stack)). The test player's sources (patterns, test audio, burn-ins) are still there for line-up, under **Test source**; an output plays them when its source is set to one. Upstream fixes merge from the `upstream` remote.
 
-![mxl-test-player: two outputs playing colour bars with 16 audio channels](assets/web-ui.png)
+![lm-mxl-playout: the Playout tab with a playlist on air and the shotbox](assets/playout-ui.png)
 
 ```bash
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j
 cd web && npm install && npm run build && cd ..
-./build/mxl-test-player
+./build/lm-mxl-playout
 ```
 
 Open `http://localhost:8130`.
 
-Container images are `ghcr.io/leeo86/mxl-test-player`. Pushes to `main` publish `nightly-dev` and `git-<sha7>`. A tag `vX.Y.Z` publishes `X.Y.Z`, `X.Y` and `X`. `nightly-dev` is the only tag that moves. The workflow is `.github/workflows/container.yaml` and the image is `docker/Dockerfile` (uid 1000).
+Container images are `ghcr.io/livemotionch/lm-mxl-playout`. Pushes to `main` publish `nightly-dev` and `git-<sha7>`. A tag `vX.Y.Z` publishes `X.Y.Z`, `X.Y` and `X`. `nightly-dev` is the only tag that moves. The workflow is `.github/workflows/container.yaml` and the image is `docker/Dockerfile` (uid 1000).
 
 ```bash
-docker build -f docker/Dockerfile -t mxl-test-player .
+docker build -f docker/Dockerfile -t lm-mxl-playout .
 ```
+
+## Playout
+
+Every output starts as a **playout** output: black and silence until an operator takes a clip. Burn-ins are off unless switched on.
+
+- **Library.** Upload clips (video, stills, GIF and APNG with alpha), tag them, search by name or tag. Uploads are converted once to the platform format (ProRes mezzanine, or raw frames for animations), so playback is cheap and deterministic.
+- **Playlists.** Ordered entries, each a library clip with an in and out point, what it does at its end (`next`: the next entry follows, `hold`: its last frame stays, `loop`: it loops until the next take, `stop`: black), the transition into it (`cut`, `mix`, `dip` through black, with a length in frames) and, for a still, its hold time (0: until the next take). A playlist can loop.
+- **Cue and take.** Cue a clip or a playlist (from any entry) on an output. With nothing on air it is **parked** on air at its first frame (cue mode `park`, a clip player for a vision mixer) or waits in the background (`background`, a channel straight to air); with something on air it becomes the **next** clip. **Take** rolls a parked clip, or transitions to the next one with its own transition (or the operator's override). The next entry of a playlist is cued by itself, and loaded ahead: from RAM, or primed in a second decode-ahead stream, so a cut lands on the frame and a mix starts that many frames before the outgoing clip ends.
+- **On air.** Pause and resume, seek, cut to black or fade to black. Countdowns to the end of the clip and of the playlist, the position, what is next and whether it is loaded.
+
+The UI's **Playout** tab is the operator screen: the output's picture, meters and on-air panel (Take `Space`, Pause `P`, Black `B`, Fade `F`), with the shotbox (every clip and playlist: click cues, double click plays) or the rundown (the playlist on air, entry by entry). **Playlists** edits the rundowns; **Library** uploads and organises. The widgets put the same on operator screens.
+
+Playout state (what is on air) is not kept over a restart: an output comes back black, with its playlists and cue mode.
 
 ## Run on the platform
 
@@ -44,6 +57,7 @@ Precedence is environment, then the JSON file (`--config`, else `PLAYER_CONFIG`,
 | `PLAYER_RAM_CLIP_MAX_S` | `20` | Longest clip kept in RAM |
 | `PLAYER_RAM_BUDGET_MB` | `4096` | One RAM budget for the whole process: every output's clips in RAM (videos up to `PLAYER_RAM_CLIP_MAX_S`, GIF and APNG clips; shared between outputs that play the same clip). Also bounds an animation's conversion |
 | `PLAYER_PREROLL_FRAMES` | `25` | Frames decoded ahead when a video streams from its mezzanine (longer than `PLAYER_RAM_CLIP_MAX_S` or over the RAM budget) |
+| `PLAYER_CUE_MODE` | `park` | A clip cued while nothing is on air: `park` (on air at its first frame, paused) or `background` (air stays black until the take). Per output `cue_mode` in the configuration file, or `PATCH /api/v1/outputs/{id}` |
 | `PLAYER_FONT_DIR` | bundled | Font directory |
 | `PLAYER_WEB_ROOT` | bundled | Built web UI |
 | `PLAYER_UPLOAD_LIMIT_GB` | `20` | Upload limit |
@@ -60,7 +74,7 @@ Precedence is environment, then the JSON file (`--config`, else `PLAYER_CONFIG`,
 | `NMOS_DNS_SD` | `false` | `true` exits 78. No Avahi and no mDNS |
 | `NMOS_PORT` | `3282` | IS-04 node API and IS-05 connection API |
 | `NMOS_SEED` | `$HOST_ID-player`; without `HOST_ID` a random `player-…` kept in `CONFIG_DIR/nmos_seed` (the hostname when that is not writable), with a warning | UUIDv5 root for every id. Set it: two players with the same seed share node and device ids and remove each other's resources. Sender, source and flow ids also depend on the output's position (Out 1, Out 2, …), so reordering outputs changes them |
-| `NMOS_LABEL` | `MXL Test Player` | Node label and device label |
+| `NMOS_LABEL` | `MXL Playout` | Node label and device label |
 | `NMOS_TAGS` | `{}` | JSON object of tag name to string array |
 | `NMOS_HOST_ADDRESS` | first non-loopback IPv4 | Address announced to NMOS. Not a name, `0.0.0.0` or loopback |
 | `HOST_ID` | unset | Legacy seed prefix when `NMOS_SEED` is unset. Not an address |
@@ -87,27 +101,42 @@ Precedence is environment, then the JSON file (`--config`, else `PLAYER_CONFIG`,
 | GET | `/api/v1/info`, `/api/v1/config`, `/api/v1/config/export`, `/api/v1/nmos` |
 | POST | `/api/v1/config/import` |
 | GET, PATCH | `/api/v1/outputs`, `/api/v1/outputs/{id}` (also `master_video`, `master_audio`, `master_data`, `master_key`) |
+| POST | `/api/v1/outputs/{id}/playout` (below) |
 | POST | `/api/v1/outputs/{id}/transport` (`play`, `pause`, `stop`, `restart`, `step`), `/api/v1/outputs/{id}/seek` |
 | PUT | `/api/v1/outputs/{id}/source`, `/api/v1/outputs/{id}/burnin` |
 | GET | `/api/v1/outputs/{id}/thumbnail`, `/api/v1/outputs/{id}/probe[?index=]`, `/api/v1/library/{id}/thumbnail` |
-| GET, POST, DELETE | `/api/v1/library`, `/api/v1/presets`, `/api/v1/playlists` |
+| GET, POST, DELETE | `/api/v1/library`, `/api/v1/presets`, `/api/v1/playlists` (`/api/v1/playlists/{id}` for GET and DELETE) |
 | PATCH, POST | `/api/v1/library/{id}` (name, tags), `/api/v1/library/{id}/reconvert` |
-| PUT | `/api/v1/playlists/{id}` |
+| PUT, PATCH | `/api/v1/playlists/{id}` (PUT replaces it, PATCH changes the fields it names) |
 | POST, PUT | `/api/v1/uploads`, `/api/v1/uploads/{id}/chunks/{n}`, `/api/v1/uploads/{id}/complete` |
 | GET | `/api/v1/jobs` |
 | WebSocket | `/api/v1/events` on `WEB_PORT` |
-| GET | `/widgets`, `/widget/transport?output=<n>[&theme=dark\|light\|transparent]` (below) |
+| GET | `/widgets`, `/widget/transport?output=<n>`, `/widget/shotbox?output=<n>`, `/widget/rundown?output=<n>[&playlist=<id>]`, each `[&theme=dark\|light\|transparent]` (below) |
 | GET, PATCH | `/x-nmos/node/v1.3/…`, `/x-nmos/connection/v1.1/single/senders/{id}/staged` on `NMOS_PORT` |
 
-Fire a clip with `PUT /api/v1/outputs/{id}/source` (`{"type": "video", "item_id": "<id>"}`, or `still`, `pattern`, `playlist`) and `POST /api/v1/outputs/{id}/transport` (`{"action": "restart"}`). An animated GIF or APNG (`sprite` item) plays the same way, as a loop with its alpha (`v210a` or `fill_key`); in a playlist set through the API its entry needs `frames` = the item's `clip_frames` for the output's format. It is converted per format into raw frames: about 8 MB of library disk per GIF frame and format at 1080 lines (33 MB at 2160). The `transparent` pattern is black at alpha 0, for a keyed output of burn-ins only. An output that feeds a keyer with graphics should set `idle_key: transparent` (patterns, videos and stop carry the idle key; an item with alpha that is not ready is transparent).
+`POST /api/v1/outputs/{id}/playout` takes `{"action": …}`, effective at the next frame the output writes, and answers the output's status (its `playout` object: `state` idle, parked, playing, paused, ended, waiting, transition or fading; `program`, `incoming`, `next` with name, entry, position, frames, `remaining_s` and `ready`; `transition`; `playlist` with `remaining_s`; `cue_mode`):
+
+| Action | Body |
+| --- | --- |
+| `cue` | `item_id` with optional `in_s`/`out_s` (or `in`/`out` in frames), `end` (default `stop`), `hold_s` for a still (0: until the next take), `transition`, `transition_frames`; or `playlist_id` with `entry` (index) or `entry_id`. `take: true` takes it at once |
+| `take` | optional `transition` (`cut`, `mix`, `dip`) and `transition_frames` override the cued entry's. 409 when nothing is cued, parked or paused |
+| `pause`, `resume` | the clip on air |
+| `stop` | black; with `transition` `mix` and `transition_frames` a fade. The next clip stays cued |
+| `clear` | removes the next clip |
+| `seek` | `frame` (from the clip's in point) or `seconds` |
+| `jump` | cues `entry` or `entry_id` of the playlist on air (or of `playlist_id`) as the next clip |
+
+A playlist is `{id, name, loop, entries: [{id, item_id, in_s, out_s, hold_s, end, transition, transition_frames}]}`; the player gives entries their ids. A playlist plays as it was cued: edit it and cue it again to change what is on air. On a playout output the test player's transport still works (`play` takes or resumes, `pause`, `stop` cuts to black, `restart`, `step`).
+
+The test player's sources: fire a clip with `PUT /api/v1/outputs/{id}/source` (`{"type": "video", "item_id": "<id>"}`, or `still`, `pattern`, `playlist`) and `POST /api/v1/outputs/{id}/transport` (`{"action": "restart"}`). An animated GIF or APNG (`sprite` item) plays the same way, as a loop with its alpha (`v210a` or `fill_key`); in a playlist set through the API its entry needs `frames` = the item's `clip_frames` for the output's format. It is converted per format into raw frames: about 8 MB of library disk per GIF frame and format at 1080 lines (33 MB at 2160). The `transparent` pattern is black at alpha 0, for a keyed output of burn-ins only. An output that feeds a keyer with graphics should set `idle_key: transparent` (patterns, videos and stop carry the idle key; an item with alpha that is not ready is transparent).
 
 `GET /api/v1/config/export` is one JSON document (`version`, informational `deployment`, and `state`). There are no secrets to omit. `POST /api/v1/config/import` restores outputs, presets and playlists. It does not change ports, the registry or the seed. `GET /api/v1/config` remains the live view.
 
 `GET /api/v1/config` also lists every setting with its effective value and origin (`environment`, `file`, `argument` for `--config`, `default`). `GET /api/v1/info` has the version and the MXL revision.
 
-The web UI (tabs Outputs, Source, Burn-ins, Library, Patterns, Playlists, NMOS, Status, Settings) uses only this API.
+The web UI (tabs Playout, Library, Playlists, Outputs, Test source, Burn-ins, Patterns, NMOS, Status, Settings) uses only this API. `PUT /api/v1/outputs/{id}/source` with `{"type": "playout"}` brings an output back from a test source.
 
-Widgets: operator screens can frame one output's transport. `GET /widgets` lists them as `[{id, title, params, min_size, version}]` (`params` is a JSON schema of the query). `GET /widget/transport?output=<n>` (1 is Out 1; `min_size` 420×160) shows the output's label, format, state and what it plays, with Play/Pause/Stop, Restart, Step, Loop and the position (click to seek a video). The page uses the player's own API and posts `widget-ready` and `widget-size` to its parent. Only the pages that `WIDGET_FRAME_ANCESTORS` names may frame it; on the platform set it to `'self' https://designer.<fqdn>`. `cd web && PLAYER_API=http://<player>:8130 npm run dev` runs it against a running player.
+Widgets: operator screens can frame them, each for one output (1 is Out 1). `GET /widgets` lists them as `[{id, title, params, min_size, version}]` (`params` is a JSON schema of the query). `transport` (`min_size` 420×220) is the on-air panel: state, clip, countdown, position, next, Take / Pause / Black / Fade (an output on a test source shows its Play/Pause/Stop transport instead). `shotbox` (400×300) is every clip and playlist: a click cues it, a double click plays it. `rundown` (420×320) is the playlist on air (or `playlist`), with Next and Play per entry. The page uses the player's own API and posts `widget-ready` and `widget-size` to its parent. Only the pages that `WIDGET_FRAME_ANCESTORS` names may frame it; on the platform set it to `'self' https://designer.<fqdn>`. `cd web && PLAYER_API=http://<player>:8130 npm run dev` runs it against a running player.
 
 `/readyz` is 200 when the process is serving and, if a registry is configured, `GET /x-nmos/query/v1.3/nodes/{id}` on the Query API returns 200.
 
@@ -115,11 +144,12 @@ Widgets: operator screens can frame one output's transport. `GET /widgets` lists
 
 ```bash
 ./build/player_tests
+python3 tests/integration/playout.py          # PLAYOUT_STREAM=1: every clip streams from its mezzanine
 python3 tests/integration/lifecycle.py
 python3 tests/integration/play_loop.py
 python3 tests/integration/keying.py [--shots DIR]
 ```
 
-`keying.py` reads the MXL grains back with `build/player_grain_dump <domain> <flow id> <index|-N> <file>` (a lab tool built with the tests) and checks the alpha and key values.
+`playout.py` reads the written grains back and checks that a playlist's cut, a 10-frame mix and a dip land on the frame (no black, no repeated frame), from RAM and streamed. `keying.py` reads the MXL grains back with `build/player_grain_dump <domain> <flow id> <index|-N> <file>` (a lab tool built with the tests) and checks the alpha and key values.
 
 See `IMPLEMENTATION_PLAN.md` for the G1–G14 audit and `deploy/` for Compose, Kubernetes and Grafana.

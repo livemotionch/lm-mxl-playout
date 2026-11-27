@@ -35,9 +35,15 @@ export const outputLabel = (index) => live.outputs.find((o) => o.index === index
 export const itemsById = computed(() => Object.fromEntries(live.library.map((i) => [i.id, i])));
 export const activeJobs = computed(() => live.jobs.filter((j) => j.state === "queued" || j.state === "running"));
 
-/** What an output plays, in one line: the pattern and test audio, the playlist and item, or the item. */
+/** What an output plays, in one line: the clip on air (playout), the pattern and test audio, the playlist and item, or the item. */
 export function sourceText(o) {
   const s = o.source || {};
+  if (s.type === "playout") {
+    const p = o.playout || {};
+    const prog = p.program;
+    if (!prog) return p.next ? `Black · next ${p.next.name}` : "Black";
+    return `${prog.name}${prog.playlist_name ? ` · ${prog.playlist_name} ${prog.entry + 1}/${prog.playlist_count}` : ""}`;
+  }
   if (s.type === "pattern") return `${patternLabel(s.pattern)}${s.pluge ? " + PLUGE" : ""} · ${signalLabel(s.audio)}`;
   if (s.type === "playlist") return `Playlist ${live.playlists.find((p) => p.id === s.playlist_id)?.name || ""}${o.item ? ` · ${o.item}` : ""}`;
   return `${s.type === "still" ? "Still" : "Video"} ${o.item || live.library.find((i) => i.id === s.item_id)?.name || ""}`;
@@ -80,6 +86,8 @@ function outputCall(method, index, leaf, body) {
   });
 }
 export const transport = (index, action) => outputCall("post", index, "transport", { action });
+/** POST /api/v1/outputs/{n}/playout: cue, take, pause, resume, stop, clear, seek, jump. */
+export const playout = (index, body) => outputCall("post", index, "playout", body);
 export const seek = (index, frame) => outputCall("post", index, "seek", { frame: Math.max(0, Math.round(frame)) });
 export const setSource = (index, body) => outputCall("put", index, "source", body);
 export const patchOutput = (index, body) => outputCall("patch", index, "", body);
@@ -91,11 +99,63 @@ export function itemFrames(item, format) {
   return item.type === "sprite" ? conv.clip_frames || 1 : conv.frames || 1;  // an animation: output frames per loop
 }
 
+// ---- playout (operator) -------------------------------------------------------
+
+function storedOperator() {
+  try {
+    return JSON.parse(localStorage.getItem("lm-mxl-playout.operator") || "{}");
+  } catch {
+    return {};
+  }
+}
+/** The operator's choices on this browser: the transition of the take, the end of a single clip. */
+export const operator = reactive({ transition: "auto", frames: 12, clipEnd: "stop", ...storedOperator() });
+export function saveOperator() {
+  try {
+    localStorage.setItem("lm-mxl-playout.operator", JSON.stringify(operator));
+  } catch {
+    /* kept for this tab only */
+  }
+}
+/** The transition override of a take ({} for the entry's own). */
+export function takeOverride() {
+  if (operator.transition === "auto") return {};
+  return { transition: operator.transition, transition_frames: operator.transition === "cut" ? 0 : Math.max(1, Number(operator.frames) || 12) };
+}
+export const take = (index) => playout(index, { action: "take", ...takeOverride() });
+export const cueItem = (index, item, extra = {}) => playout(index, { action: "cue", item_id: item.id, end: operator.clipEnd, ...extra });
+export const cuePlaylist = (index, playlist, entry = 0, extra = {}) => playout(index, { action: "cue", playlist_id: playlist.id, entry, ...extra });
+
+/** The playlist an output plays (on air, incoming or next), or null. */
+export function playlistOnAir(o) {
+  const p = o?.playout || {};
+  for (const k of ["incoming", "program", "next"]) if (p[k]?.playlist_id) return live.playlists.find((x) => x.id === p[k].playlist_id) || null;
+  return null;
+}
+
+/** A length in seconds as M:SS:FF at `fps` (operator countdowns). */
+export function fmtClock(seconds, fps = 25) {
+  if (seconds == null || !Number.isFinite(seconds)) return "--:--:--";
+  const total = Math.max(0, Math.round(seconds * fps));
+  const f = Math.round(fps);
+  const ff = total % f;
+  const s = Math.floor(total / f);
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  const pad = (n) => String(n).padStart(2, "0");
+  return `${h ? `${h}:${pad(m)}` : m}:${pad(s % 60)}:${pad(ff)}`;
+}
+
+/** Plays a library item on an output now (cue and take, on the playout). */
+export const playItem = (index, item) => cueItem(index, item, { take: true });
+/** Plays a playlist on an output now (cue its first entry and take). */
+export const playPlaylist = (index, playlist) => cuePlaylist(index, playlist, 0, { take: true });
+
 /**
- * Plays a playlist on an output. The API takes the entries with their frame counts: a video's
- * converted length, a still's hold time (`hold_s`, kept with the playlist) at the output's rate.
+ * The test player's playlist source (Source tab): the API takes the entries with their frame
+ * counts: a video's converted length, a still's hold time (`hold_s`) at the output's rate.
  */
-export async function playPlaylist(index, playlist) {
+export async function playPlaylistSource(index, playlist) {
   const output = live.outputs.find((o) => o.index === index);
   const fps = formatFps(output?.format);
   const entries = (playlist.entries || [])
@@ -103,7 +163,7 @@ export async function playPlaylist(index, playlist) {
     .map((e) => {
       const item = itemsById.value[e.item_id];
       const frames = item.type === "still" ? Math.max(1, Math.round((e.hold_s || 5) * fps)) : itemFrames(item, output?.format) || 1;
-      return { item_id: e.item_id, loops: Number(e.loops ?? 1), frames };
+      return { item_id: e.item_id, loops: e.end === "loop" ? 0 : Number(e.loops ?? 1), frames };
     });
   if (!entries.length) {
     live.actionError = `Playlist "${playlist.name}" has no items in the library.`;
@@ -114,8 +174,8 @@ export async function playPlaylist(index, playlist) {
   return result;
 }
 
-/** Plays a library item on an output (a still keeps the output's test audio). */
-export async function playItem(index, item) {
+/** Plays a library item as the output's test source (a still keeps the output's test audio). */
+export async function playItemSource(index, item) {
   const output = live.outputs.find((o) => o.index === index);
   const src = output?.source || {};
   const body =

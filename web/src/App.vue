@@ -2,6 +2,7 @@
 import { computed, onMounted, onUnmounted, provide, ref } from "vue";
 import Pill from "./components/Pill.vue";
 import OutputsTab from "./components/OutputsTab.vue";
+import PlayoutTab from "./components/PlayoutTab.vue";
 import SourceTab from "./components/SourceTab.vue";
 import BurninsTab from "./components/BurninsTab.vue";
 import LibraryTab from "./components/LibraryTab.vue";
@@ -12,19 +13,22 @@ import StatusTab from "./components/StatusTab.vue";
 import SettingsTab from "./components/SettingsTab.vue";
 import { activeJobs, live, startLive, stopLive } from "./store.js";
 
+// Playout first: the operator's screen. The test player's tools (test source, burn-ins, patterns)
+// stay for line-up and checks.
 const tabs = [
-  { id: "outputs", label: "Outputs", component: OutputsTab, full: true },
-  { id: "source", label: "Source", component: SourceTab },
-  { id: "burnins", label: "Burn-ins", component: BurninsTab },
+  { id: "playout", label: "Playout", component: PlayoutTab, full: true },
   { id: "library", label: "Library", component: LibraryTab },
-  { id: "patterns", label: "Patterns", component: PatternsTab },
   { id: "playlists", label: "Playlists", component: PlaylistsTab },
+  { id: "outputs", label: "Outputs", component: OutputsTab, full: true },
+  { id: "source", label: "Test source", component: SourceTab },
+  { id: "burnins", label: "Burn-ins", component: BurninsTab },
+  { id: "patterns", label: "Patterns", component: PatternsTab },
   { id: "nmos", label: "NMOS", component: NmosTab },
   { id: "status", label: "Status", component: StatusTab },
   { id: "settings", label: "Settings", component: SettingsTab },
 ];
 
-const current = ref("outputs");
+const current = ref("playout");
 const tab = computed(() => tabs.find((t) => t.id === current.value));
 
 function onHash() {
@@ -38,6 +42,7 @@ function go(id) {
 provide("go", go);
 
 const playing = computed(() => live.outputs.filter((o) => o.transport === "play").length);
+const onAir = computed(() => live.outputs.filter((o) => o.playout?.program && o.playout.state !== "parked"));
 const underruns = computed(() => Object.values(live.underruns).reduce((a, b) => a + b, 0));
 const sendersOff = computed(() =>
   live.outputs.reduce(
@@ -69,6 +74,7 @@ onUnmounted(() => {
     <h1>lm-mxl-playout</h1>
     <span v-if="live.info" class="node">{{ live.info.label }} · {{ live.info.format }} · {{ live.info.outputs }} output{{ live.info.outputs > 1 ? "s" : "" }}</span>
     <span class="spacer"></span>
+    <Pill v-for="o in onAir" :key="o.index" :text="`${o.label}: ${o.playout.program.name}`" :kind="o.playout.state === 'playing' || o.playout.state === 'transition' ? 'ok' : 'warn'" :title="`${o.label} ${o.playout.state}`" />
     <Pill v-if="live.outputs.length" :text="`${playing} of ${live.outputs.length} playing`" :kind="playing ? 'ok' : 'neutral'" title="outputs in play" />
     <Pill v-if="underruns" :text="`${underruns} underruns/min`" kind="warn" title="grains written late or repeated in the last minute" />
     <Pill v-if="sendersOff" :text="`${sendersOff} sender${sendersOff > 1 ? 's' : ''} off`" kind="warn" title="IS-05 master_enable off: the flow is not written" />

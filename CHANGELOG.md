@@ -1,5 +1,29 @@
 # Changelog
 
+## 2.0.0 (lm-mxl-playout, unreleased)
+
+The Livemotion fork of mxl-test-player 1.3.3 as a media playout. See README "Playout".
+
+### Playout
+
+- **Cue and take.** New source type `playout`, the default of every output: `POST /api/v1/outputs/{id}/playout` cues a clip or a playlist (from any entry), takes it, pauses, resumes, seeks, cuts or fades to black, clears or jumps to an entry. A cue while nothing is on air parks the clip on air at its first frame (`PLAYER_CUE_MODE=park`, the default) or waits in the background (`background`); a cue while something plays becomes the next clip.
+- **Rundown playlists.** An entry has an in and out point, an end action (`next`, `hold`, `loop`, `stop`), a transition into it (`cut`, `mix`, `dip`, with frames) and, for a still, a hold time. A playlist can loop. Entries get stable ids. The next entry is cued by itself.
+- **Frame-accurate transitions.** The next clip is loaded ahead: from RAM, or primed in a second decode-ahead stream (an output has two now, `src/stream.cpp`), so a take cuts on the frame and an auto-advance mix starts that many frames before the outgoing clip ends. A streamed clip counts as ready only once its stream holds its in point. Mix and dip blend the picture, the key or alpha (`mix_v210`, `mix_a10`) and the sound (gain ramped across each grain). A command takes effect at the next frame the output writes.
+- **Status.** The output's status has a `playout` object: state, program, incoming, next (with `ready`), the transition, countdowns of the clip and the playlist. `transport` maps onto it (play, pause, stop) for the metrics and the test player's UI.
+- **UI.** A Playout tab first: picture, meters and the on-air panel (Take, Pause/Resume, Black, Fade, the take's transition; keys Space, P, B, F), with a shotbox (click cues, double click plays; what a single clip does at its end) and a rundown. The Playlists tab edits in/out, end actions, transitions and hold times. Library "Play on" cues and takes.
+- **Widgets.** `transport` is the on-air panel on a playout output; new `shotbox` and `rundown` (`playlist` optional).
+
+### Changed defaults (breaking)
+
+- Outputs start black and silent (playout), not with colour bars and tone; burn-ins (label, timecode, frame counter, item, flow id) are off by default.
+- The binary, image and UI are `lm-mxl-playout` (`ghcr.io/livemotionch/lm-mxl-playout`); `NMOS_LABEL` defaults to `MXL Playout`. Metric names keep the `mxl_test_player_` prefix, and the NMOS ids the same seed derivation, so dashboards and ids carry over.
+- The test player's sources stay (Test source tab, `PUT /api/v1/outputs/{id}/source` with `pattern`, `video`, `still`, `playlist`); `{"type": "playout"}` brings an output back. The playlist source reads the new entries (`end: loop` is `loops: 0`).
+
+### Tests
+
+- Unit tests of the playout state machine (park, background, end actions, cut, mix and dip timing, pause and seek, stills, looping playlists, waiting for the next clip, countdowns) and of the blends.
+- `tests/integration/playout.py` reads the grains back: a playlist's cut is exactly 25 + 25 frames with no black, a 10-frame mix and a dip land on the frame, from RAM and with `PLAYOUT_STREAM=1` streamed.
+
 ## 1.3.3 (2026-11-18)
 
 ### Changes

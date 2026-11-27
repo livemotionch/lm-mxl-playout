@@ -15,7 +15,7 @@ import {
   isDirty,
   live,
   patchOutput,
-  playPlaylist,
+  playPlaylistSource,
   refreshLists,
   revertDraft,
   selectedOutput,
@@ -57,7 +57,7 @@ async function applySource() {
   const index = o.value.index;
   if (s.type === "playlist") {
     const pl = live.playlists.find((p) => p.id === s.playlist_id);
-    if (pl && (await playPlaylist(index, pl))) revertDraft("source", index, sourceOf(live.outputs.find((x) => x.index === index)));
+    if (pl && (await playPlaylistSource(index, pl))) revertDraft("source", index, sourceOf(live.outputs.find((x) => x.index === index)));
     return;
   }
   const body = { ...s, frequency: Number(s.frequency), level_dbfs: Number(s.level_dbfs) };

@@ -350,7 +350,8 @@ nlohmann::json Playout::layer_json(const Layer& l, std::int64_t abs, double fps)
                      {"position", pos},
                      {"frames", known > 0 ? known : 0},
                      {"endless", known < 0}};
-    j["remaining_s"] = known > 0 && fps > 0 ? static_cast<double>(std::max<std::int64_t>(0, known - pos)) / fps : 0.0;
+    // An ended (held) clip has no time left; else the frames after the one on air.
+    j["remaining_s"] = known > 0 && fps > 0 && !l.ended ? static_cast<double>(std::max<std::int64_t>(0, known - pos)) / fps : 0.0;
     if (l.ctx) {
         j["playlist_id"] = l.ctx->id;
         j["playlist_name"] = l.ctx->name;
@@ -393,12 +394,13 @@ nlohmann::json Playout::status(std::int64_t abs, double fps) const {
         bool endless = ctx.loop;
         const auto cj = layer_json(*cur, abs, fps);
         remain += cj.value("remaining_s", 0.0);
-        if (cj.value("endless", false) || cur->spec.end == EndAction::Hold || cur->spec.end == EndAction::Loop) endless = true;
+        // A clip that loops (or a still without a hold time) has no end; one that holds ends the run.
+        if (cj.value("endless", false) || cur->spec.end == EndAction::Loop) endless = true;
         // Only entries that follow by themselves count: an entry that stops, holds or loops ends the run.
         for (std::size_t i = static_cast<std::size_t>(cur->spec.entry) + 1; cur->spec.end == EndAction::Next && i < ctx.entries.size() && !endless; ++i) {
             const auto& e = ctx.entries[i];
             const std::int64_t frames = e.type == "still" ? e.hold_frames : std::max<std::int64_t>(0, (e.out > 0 ? e.out : e.frames_hint) - e.in);
-            if (frames <= 0 || e.end == EndAction::Hold || e.end == EndAction::Loop) endless = true;
+            if (frames <= 0 || e.end == EndAction::Loop) endless = true;
             if (fps > 0) remain += static_cast<double>(std::max<std::int64_t>(0, frames)) / fps;
             if (e.end != EndAction::Next) break;
         }

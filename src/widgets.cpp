@@ -43,26 +43,46 @@ void widget_response(const Config& cfg, const HttpRequest& req, const std::strin
         error(405, "widgets answer GET only");
         return;
     }
+    // transport: on air, next and the take (a test source: its transport); shotbox: clips and
+    // playlists to cue; rundown: the playlist on air (or `playlist`) to cue from.
+    struct Widget {
+        const char* id;
+        const char* title;
+        int w, h;
+        bool playlist;
+    };
+    static const Widget widgets[] = {
+        {"transport", "Playout transport", 420, 220, false},
+        {"shotbox", "Shotbox", 400, 300, false},
+        {"rundown", "Rundown", 420, 320, true},
+    };
     if (req.path == "/widgets") {
         const json output = {{"type", "integer"},
                              {"minimum", 1},
                              {"maximum", cfg.outputs},
                              {"title", "Output"},
                              {"description", "1 is the first output (Out 1, API index 0)"}};
-        const json params = {{"type", "object"}, {"properties", {{"output", output}}}, {"required", json::array({"output"})}};
-        res.set_text(json::array({json{{"id", "transport"},
-                                       {"title", "Player transport"},
-                                       {"params", params},
-                                       {"min_size", {{"w", 420}, {"h", 160}}},
-                                       {"version", PLAYER_VERSION}}})
-                         .dump());
+        json list = json::array();
+        for (const auto& w : widgets) {
+            json props = {{"output", output}};
+            if (w.playlist) props["playlist"] = {{"type", "string"}, {"title", "Playlist"}, {"description", "a playlist id; without it the playlist on air"}};
+            list.push_back(json{{"id", w.id},
+                                {"title", w.title},
+                                {"params", {{"type", "object"}, {"properties", props}, {"required", json::array({"output"})}}},
+                                {"min_size", {{"w", w.w}, {"h", w.h}}},
+                                {"version", PLAYER_VERSION}});
+        }
+        res.set_text(list.dump());
         for (const auto& [key, value] : req.headers)
             if (strcasecmp(key.c_str(), "Origin") == 0 && listed_origin(cfg.widget_frame_ancestors, value))
                 res.headers["Access-Control-Allow-Origin"] = value;
         res.headers["Vary"] = "Origin";
         return;
     }
-    if (req.path != "/widget/transport") {
+    bool known = false;
+    for (const auto& w : widgets)
+        if (req.path == std::string("/widget/") + w.id) known = true;
+    if (!known) {
         error(404, "widget not found");
         return;
     }

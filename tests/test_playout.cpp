@@ -393,3 +393,23 @@ TEST_CASE("mix_v210 and mix_a10 blend 10-bit samples towards each other and towa
     unpack_alpha10_line(ao.data(), w, al.data());
     CHECK(al[10] == 1023);
 }
+
+TEST_CASE("playout: a playlist that ends with a held clip counts down to it; a held clip has no time left") {
+    Playout p;
+    auto ctx = playlist({clip("a", EndAction::Next), clip("b", EndAction::Hold)});
+    ctx->entries[1].frames_hint = 50;
+    p.cue(ctx->entries[0], ctx, 0);
+    ready_all(p, {{"a", 50}, {"b", 50}});
+    p.take(0);
+    p.tick(0);
+    auto st = p.status(0, 50);
+    CHECK_FALSE(st["playlist"].value("endless", true));
+    CHECK(st["playlist"].value("remaining_s", 0.0) == doctest::Approx(2.0));
+    for (int t = 1; t <= 101; ++t) {
+        p.tick(t);
+        ready_all(p, {{"a", 50}, {"b", 50}});
+    }
+    st = p.status(101, 50);
+    CHECK(st.value("state", "") == "ended");
+    CHECK(st["program"].value("remaining_s", 1.0) == 0.0);
+}

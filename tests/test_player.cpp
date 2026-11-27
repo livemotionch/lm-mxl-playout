@@ -1367,9 +1367,12 @@ TEST_CASE("widgets: the list with CORS for listed origins, the page with CSP fra
     CHECK(header(list, "Vary") == "Origin");
     const auto body = nlohmann::json::parse(std::string(list.body.begin(), list.body.end()));
     REQUIRE(body.is_array());
-    REQUIRE(body.size() == 1);
+    REQUIRE(body.size() == 3);
     CHECK(body[0]["id"] == "transport");
-    CHECK(body[0]["min_size"] == nlohmann::json{{"w", 420}, {"h", 160}});
+    CHECK(body[1]["id"] == "shotbox");
+    CHECK(body[2]["id"] == "rundown");
+    CHECK(body[2]["params"]["properties"].contains("playlist"));
+    CHECK(body[0]["min_size"] == nlohmann::json{{"w", 420}, {"h", 220}});
     CHECK(body[0]["params"]["properties"]["output"]["minimum"] == 1);
     CHECK(body[0]["params"]["properties"]["output"]["maximum"] == 2);
     CHECK(body[0]["params"]["required"] == nlohmann::json::array({"output"}));
@@ -1399,6 +1402,9 @@ TEST_CASE("widgets: the list with CORS for listed origins, the page with CSP fra
     CHECK(get("/widget/transport", "output=x").status == 400);
     CHECK(get("/widget/transport", "output=1&theme=pink").status == 400);
     CHECK(get("/widget/clips", "output=1").status == 404);
+    CHECK(get("/widget/shotbox", "output=1").status == 200);
+    CHECK(get("/widget/rundown", "output=2&playlist=abc").status == 200);
+    CHECK(get("/widget/rundown").status == 400);
     CHECK(widget_path("/widgets"));
     CHECK(widget_path("/widget/transport"));
     CHECK_FALSE(widget_path("/api/v1/outputs"));
