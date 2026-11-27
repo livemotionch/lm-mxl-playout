@@ -165,6 +165,10 @@ OutputConfig output_from_json(const json& j, int index) {
         o.cue_mode = parse_cue_mode(s, CueMode::Park);
         o.cue_mode_set = true;
     }
+    if (j.contains("auto_take")) {
+        o.auto_take = j.at("auto_take").get<bool>();
+        o.auto_take_set = true;
+    }
     if (j.contains("burnin")) o.burnin = parse_burnin(j.at("burnin"));
     return o;
 }
@@ -193,6 +197,7 @@ void validate(Config& c) {
     }
     for (auto& o : c.output_configs) {
         if (!o.cue_mode_set) o.cue_mode = c.cue_mode;
+        if (!o.auto_take_set) o.auto_take = c.auto_take;
         if (o.audio_channels == 0) o.audio_channels = c.audio_channels;
         if (o.audio_channels < 2 || o.audio_channels > 64) throw ConfigError("output audio_channels must be 2..64");
         if (!o.format.empty() && !parse_format(o.format)) throw ConfigError("invalid output format " + o.format);
@@ -435,6 +440,7 @@ Config load_config(const std::string& file_path, const char* const* envp) {
         if (cue != "park" && cue != "background") throw ConfigError("PLAYER_CUE_MODE must be park or background");
         c.cue_mode = parse_cue_mode(cue, CueMode::Park);
     }
+    c.auto_take = pick_bool("PLAYER_AUTO_TAKE", "auto_take", false);
     c.mxl_scan_path = pick_str("MXL_DOMAIN_SCAN_PATH", "mxl_scan_path", "/Volumes/mxl");
     c.mxl_domain_dir = pick_str("MXL_OUTPUT_DOMAIN_DIR", "mxl_domain_dir", "");
     c.mxl_domain_id = pick_str("MXL_OUTPUT_DOMAIN_ID", "mxl_domain_id", "");
@@ -540,6 +546,7 @@ Config load_config(const std::string& file_path, const char* const* envp) {
         {"PLAYER_DECODE_THREADS", std::to_string(c.decode_threads)},
         {"PLAYER_LOUDNESS_TARGET", num(c.loudness_target_lufs)},
         {"PLAYER_CUE_MODE", cue_mode_name(c.cue_mode)},
+        {"PLAYER_AUTO_TAKE", c.auto_take ? "true" : "false"},
         {"PLAYER_FONT_DIR", c.font_dir},
         {"PLAYER_WEB_ROOT", c.web_root},
         {"PLAYER_UPLOAD_LIMIT_GB", num(static_cast<double>(c.upload_limit_bytes) / static_cast<double>(1ull << 30))},

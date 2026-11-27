@@ -67,6 +67,9 @@ onUnmounted(() => window.removeEventListener("keydown", onKey));
       <span class="caption">Cue</span>
       <Segmented :options="CUE_MODES" :model-value="o.playout?.cue_mode" label="Cue mode" @update:model-value="(m) => patchOutput(o.index, { cue_mode: m })" />
     </div>
+    <label v-if="o && isPlayout" class="check" title="When the clip on air is done (its end, also one that holds or stops), the cued clip goes on air by itself with its transition. A looping clip loops until Take.">
+      <input type="checkbox" :checked="!!o.playout?.auto_take" @change="patchOutput(o.index, { auto_take: $event.target.checked })" /> Auto take
+    </label>
     <span class="spacer"></span>
     <span class="muted small keys"><kbd>Space</kbd> take · <kbd>P</kbd> pause · <kbd>B</kbd> black · <kbd>F</kbd> fade</span>
   </div>

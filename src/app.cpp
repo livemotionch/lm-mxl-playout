@@ -191,7 +191,8 @@ void App::Impl::save_state() {
                            {"master_audio", st.value("master_audio", true)},
                            {"master_data", st.value("master_data", true)},
                            {"master_key", st.value("master_key", true)},
-                           {"cue_mode", st.contains("playout") ? st["playout"].value("cue_mode", "park") : "park"}});
+                           {"cue_mode", st.contains("playout") ? st["playout"].value("cue_mode", "park") : "park"},
+                           {"auto_take", st.contains("playout") && st["playout"].value("auto_take", false)}});
     }
     std::error_code ec;
     fs::create_directories(fs::path(cfg.state_path).parent_path(), ec);
@@ -233,6 +234,7 @@ void App::Impl::load_state() {
         if (i >= static_cast<int>(outputs.size())) break;
         if (o.contains("burnin")) outputs[i]->set_burnin(burnin_from_json(o["burnin"]));
         if (o.contains("cue_mode") && o["cue_mode"].is_string()) outputs[i]->set_cue_mode(parse_cue_mode(o["cue_mode"].get<std::string>(), CueMode::Park));
+        if (o.contains("auto_take") && o["auto_take"].is_boolean()) outputs[i]->set_auto_take(o["auto_take"].get<bool>());
         if (o.contains("source")) outputs[i]->set_source(source_from_json(o["source"]));
         if (o.contains("transport")) outputs[i]->command(o["transport"].get<std::string>() == "pause" ? "pause" : o["transport"].get<std::string>() == "stop" ? "stop" : "play");
         const auto ids = outputs[i]->ids();
@@ -609,7 +611,8 @@ void App::Impl::handle(const HttpRequest& req, HttpResponse& res) {
                                                                   {"master_audio", st["master_audio"]},
                                                                   {"master_data", st["master_data"]},
                                                                   {"master_key", st["master_key"]},
-                                                                  {"cue_mode", st.contains("playout") ? st["playout"].value("cue_mode", "park") : "park"}});
+                                                                  {"cue_mode", st.contains("playout") ? st["playout"].value("cue_mode", "park") : "park"},
+                           {"auto_take", st.contains("playout") && st["playout"].value("auto_take", false)}});
                                           }
                                           return arr;
                                       }()},
@@ -688,6 +691,13 @@ void App::Impl::handle(const HttpRequest& req, HttpResponse& res) {
                         return;
                     }
                     o->set_cue_mode(parse_cue_mode(m, CueMode::Park));
+                }
+                if (b.contains("auto_take")) {
+                    if (!b.at("auto_take").is_boolean()) {
+                        text(json{{"error", "auto_take must be true or false"}}, 400);
+                        return;
+                    }
+                    o->set_auto_take(b.at("auto_take").get<bool>());
                 }
                 o->patch(b);
                 refresh_nmos();

@@ -96,6 +96,12 @@ class Playout {
 public:
     void set_cue_mode(CueMode m) { cue_mode_ = m; }
     CueMode cue_mode() const { return cue_mode_; }
+    // Auto take: when the program is done (at its out point, also one that holds or stops, or
+    // already held or gone to black) the cued clip is taken by itself, with its own transition. A
+    // clip that loops keeps looping until a take. With nothing on air a cue is taken (not parked)
+    // once it is loaded.
+    void set_auto_take(bool on) { auto_take_ = on; }
+    bool auto_take() const { return auto_take_; }
 
     // Cues a clip, effective at frame `now`. Nothing on air (and cue mode Park): it is parked on air
     // at its in point; else it becomes the next clip (replacing one cued before). Returns the layer id.
@@ -166,6 +172,7 @@ private:
     nlohmann::json layer_json(const Layer& l, std::int64_t abs, double fps) const;
 
     CueMode cue_mode_ = CueMode::Park;
+    bool auto_take_ = false;
     std::unique_ptr<Layer> program_;
     std::unique_ptr<Layer> incoming_;
     std::unique_ptr<Layer> next_;

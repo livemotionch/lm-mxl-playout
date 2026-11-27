@@ -94,7 +94,7 @@ int Playout::cue(ClipSpec spec, std::shared_ptr<const PlaylistContext> ctx, std:
     (void)now;
     auto l = make_layer(std::move(spec), std::move(ctx));
     const int id = l->id;
-    if (!program_ && !incoming_ && cue_mode_ == CueMode::Park) {
+    if (!program_ && !incoming_ && cue_mode_ == CueMode::Park && !auto_take_) {
         program_ = std::move(l);
         next_.reset();
         auto_cue();
@@ -244,8 +244,10 @@ PlayoutFrame Playout::tick(std::int64_t abs) {
         if (len > 0) {
             const std::int64_t pos = pos_at(*program_, abs);
             const EndAction e = program_->spec.end;
+            // With auto take a clip that holds or stops follows on like one that plays the next.
+            const bool follows = e == EndAction::Next || (auto_take_ && next_ && e != EndAction::Loop);
             bool advanced = false;
-            if (e == EndAction::Next && next_ && next_->ready) {
+            if (follows && next_ && next_->ready) {
                 const TransitionKind k = next_->spec.transition;
                 const int f = k == TransitionKind::Cut ? 0 : next_->spec.transition_frames;
                 if (pos >= len - f) {
@@ -253,7 +255,9 @@ PlayoutFrame Playout::tick(std::int64_t abs) {
                     advanced = true;
                 }
             }
-            if (!advanced && pos >= len) {
+            if (!advanced && pos >= len && follows && next_) {
+                program_->waiting = true;  // its last frame stays until the next clip is loaded
+            } else if (!advanced && pos >= len) {
                 switch (e) {
                     case EndAction::Loop: break;
                     case EndAction::Hold:
@@ -270,6 +274,12 @@ PlayoutFrame Playout::tick(std::int64_t abs) {
                 }
             }
         }
+    }
+    // Auto take after the program is done: held at its end, or black (stopped, or nothing cued
+    // before); a parked or paused clip is not done.
+    if (auto_take_ && !tr_.active && next_ && next_->ready && (!program_ || program_->ended)) {
+        const TransitionKind k = next_->spec.transition;
+        start_transition(abs, k, k == TransitionKind::Cut ? 0 : next_->spec.transition_frames);
     }
     for (auto* l : {program_.get(), incoming_.get(), next_.get()})
         if (l && l->ready && l->ready_tick < 0) l->ready_tick = abs;
@@ -372,7 +382,7 @@ nlohmann::json Playout::status(std::int64_t abs, double fps) const {
         else if (program_->playing) state = "playing";
         else state = "paused";
     }
-    nlohmann::json j{{"state", state}, {"cue_mode", cue_mode_name(cue_mode_)}};
+    nlohmann::json j{{"state", state}, {"cue_mode", cue_mode_name(cue_mode_)}, {"auto_take", auto_take_}};
     j["program"] = program_ ? layer_json(*program_, abs, fps) : nlohmann::json();
     j["incoming"] = incoming_ ? layer_json(*incoming_, abs, fps) : nlohmann::json();
     j["next"] = next_ ? layer_json(*next_, abs, fps) : nlohmann::json();

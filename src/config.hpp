@@ -88,6 +88,10 @@ struct OutputConfig {
     // (background). PLAYER_CUE_MODE, or "cue_mode" per output in the configuration file.
     CueMode cue_mode = CueMode::Park;
     bool cue_mode_set = false;  // set per output (else PLAYER_CUE_MODE applies)
+    // The cued clip is taken by itself when the program is done (Playout::set_auto_take).
+    // PLAYER_AUTO_TAKE, or "auto_take" per output.
+    bool auto_take = false;
+    bool auto_take_set = false;
     BurnInConfig burnin;
 };
 
@@ -113,6 +117,7 @@ struct Config {
     int ram_budget_mb = 4096;
     int preroll_frames = 25;
     CueMode cue_mode = CueMode::Park;
+    bool auto_take = false;
     std::string config_dir = "/config";
     std::string mxl_scan_path = "/Volumes/mxl";
     std::string mxl_domain_dir;

@@ -184,6 +184,7 @@ Output::Output(int index, OutputConfig cfg, VideoFormat platform, MxlSession& mx
     source_.pattern = "smpte_rp219";
     source_.audio = "sine";
     playout_.set_cue_mode(cfg_.cue_mode);
+    playout_.set_auto_take(cfg_.auto_take);
     for (int i = 0; i < 2; ++i) decoders_[i] = std::make_unique<StreamDecoder>(index_, preroll_frames_);
     refresh_gains();
 }
@@ -678,6 +679,17 @@ bool Output::playout(const std::function<bool(Playout&, std::int64_t now)>& fn) 
     }
     if (cb) cb();
     return ok;
+}
+
+void Output::set_auto_take(bool on) {
+    std::function<void()> cb;
+    {
+        std::lock_guard lock(mu_);
+        playout_.set_auto_take(on);
+        cfg_.auto_take = on;
+        cb = on_change;
+    }
+    if (cb) cb();
 }
 
 void Output::set_cue_mode(CueMode m) {
@@ -1538,6 +1550,7 @@ nlohmann::json Output::status() const {
             }
         }
         po["cue_mode"] = cue_mode_name(playout_.cue_mode());
+        po["auto_take"] = playout_.auto_take();
         j["playout"] = std::move(po);
     }
     return j;

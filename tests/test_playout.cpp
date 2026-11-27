@@ -413,3 +413,115 @@ TEST_CASE("playout: a playlist that ends with a held clip counts down to it; a h
     CHECK(st.value("state", "") == "ended");
     CHECK(st["program"].value("remaining_s", 1.0) == 0.0);
 }
+
+TEST_CASE("playout: auto take puts the cued clip on air when the program is done") {
+    SUBCASE("a clip that stops: the cued clip follows on the frame after its last") {
+        Playout p;
+        p.cue(clip("a", EndAction::Stop), nullptr, 0);
+        ready_all(p, {{"a", 4}});
+        p.take(0);
+        p.set_auto_take(true);
+        p.cue(clip("b", EndAction::Stop), nullptr, 0);
+        ready_all(p, {{"a", 4}, {"b", 6}});
+        for (int t = 0; t < 4; ++t) CHECK(p.tick(t).a.frame == t);
+        const auto f = p.tick(4);
+        CHECK(on_air(p, f) == "b");
+        CHECK(f.a.frame == 0);
+        CHECK(f.a.rolling);
+        CHECK(state(p, 4) == "playing");
+    }
+    SUBCASE("a clip that holds: a mix starts before its end, with the cued clip's transition") {
+        Playout p;
+        p.cue(clip("a", EndAction::Hold), nullptr, 0);
+        p.take(0);
+        p.set_auto_take(true);
+        p.cue(clip("b", EndAction::Stop, TransitionKind::Mix, 2), nullptr, 0);
+        ready_all(p, {{"a", 6}, {"b", 6}});
+        for (int t = 0; t < 4; ++t) CHECK_FALSE(p.tick(t).transition);
+        const auto f = p.tick(4);
+        CHECK(f.transition);
+        CHECK(f.a.frame == 4);
+        CHECK(f.b.frame == 0);
+        CHECK(p.tick(6).a.frame == 2);  // b on air, two frames in
+        CHECK(on_air(p, p.tick(6)) == "b");
+    }
+    SUBCASE("a clip that loops loops on until a take") {
+        Playout p;
+        p.cue(clip("a", EndAction::Loop), nullptr, 0);
+        p.take(0);
+        p.set_auto_take(true);
+        p.cue(clip("b"), nullptr, 0);
+        ready_all(p, {{"a", 3}, {"b", 3}});
+        for (int t = 0; t < 10; ++t) CHECK(p.tick(t).a.frame == t % 3);
+        CHECK(on_air(p, p.tick(10)) == "a");
+        p.take(11);
+        CHECK(on_air(p, p.tick(11)) == "b");
+    }
+    SUBCASE("a held clip takes a clip cued after its end once that is loaded; the last frame stays meanwhile") {
+        Playout p;
+        p.cue(clip("a", EndAction::Hold), nullptr, 0);
+        ready_all(p, {{"a", 3}});
+        p.take(0);
+        p.set_auto_take(true);
+        for (int t = 0; t < 6; ++t) p.tick(t);
+        CHECK(state(p, 6) == "ended");
+        p.cue(clip("b"), nullptr, 6);
+        CHECK(p.tick(6).a.frame == 2);  // b is not loaded yet
+        CHECK(on_air(p, p.tick(7)) == "a");
+        ready_all(p, {{"a", 3}, {"b", 5}});
+        const auto f = p.tick(8);
+        CHECK(on_air(p, f) == "b");
+        CHECK(f.a.frame == 0);
+    }
+    SUBCASE("a clip that stops waits on its last frame for a cued clip that is still loading") {
+        Playout p;
+        p.cue(clip("a", EndAction::Stop), nullptr, 0);
+        ready_all(p, {{"a", 3}});
+        p.take(0);
+        p.set_auto_take(true);
+        p.cue(clip("b"), nullptr, 0);
+        for (int t = 0; t < 3; ++t) p.tick(t);
+        auto f = p.tick(3);
+        CHECK(on_air(p, f) == "a");
+        CHECK(f.a.frame == 2);
+        CHECK_FALSE(f.a.rolling);
+        CHECK(state(p, 3) == "waiting");
+        ready_all(p, {{"a", 3}, {"b", 5}});
+        f = p.tick(4);
+        CHECK(on_air(p, f) == "b");
+        CHECK(f.a.frame == 0);
+        // Cleared while it waits: the stop goes ahead.
+        Playout q;
+        q.cue(clip("a", EndAction::Stop), nullptr, 0);
+        ready_all(q, {{"a", 2}});
+        q.take(0);
+        q.set_auto_take(true);
+        q.cue(clip("b"), nullptr, 0);
+        for (int t = 0; t < 3; ++t) q.tick(t);
+        q.clear_next();
+        CHECK(q.tick(3).a.layer == 0);
+    }
+    SUBCASE("with nothing on air a cue goes on air once loaded, not parked (also in park mode)") {
+        Playout p;
+        p.set_auto_take(true);
+        p.cue(clip("a", EndAction::Stop), nullptr, 0);
+        CHECK(state(p, 0) == "idle");
+        CHECK(p.tick(0).a.layer == 0);
+        ready_all(p, {{"a", 4}});
+        auto f = p.tick(1);
+        CHECK(on_air(p, f) == "a");
+        CHECK(f.a.frame == 0);
+        CHECK(f.a.rolling);
+        CHECK(p.tick(2).a.frame == 1);
+    }
+    SUBCASE("off: a held clip stays held with a clip cued") {
+        Playout p;
+        p.cue(clip("a", EndAction::Hold), nullptr, 0);
+        p.take(0);
+        p.cue(clip("b"), nullptr, 0);
+        ready_all(p, {{"a", 3}, {"b", 3}});
+        for (int t = 0; t < 8; ++t) p.tick(t);
+        CHECK(state(p, 8) == "ended");
+        CHECK(on_air(p, p.tick(8)) == "a");
+    }
+}

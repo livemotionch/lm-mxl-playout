@@ -295,6 +295,34 @@ def main():
             print("other format", r, "missed", http("GET", "/api/v1/outputs/0")["stream_missed"])
             assert runs(from_first(seq, "dark")) == [("dark", FPS), ("mid", FPS), ("light", FPS)], r
 
+        # Auto take: a single clip that holds, with another cued while it plays, goes straight on
+        # into it at its end (25 light, then 25 dark, then black); off again, a held clip stays.
+        playout({"action": "cue", "item_id": light["id"], "end": "hold"})
+        time.sleep(0.6)
+        start = tai_index()
+        playout({"action": "take"})
+        st = http("PATCH", "/api/v1/outputs/0", {"auto_take": True})
+        assert st["playout"]["auto_take"], st["playout"]
+        playout({"action": "cue", "item_id": dark["id"], "end": "stop"})
+        time.sleep(2.6)
+        seq = [classify(y, levels) if y is not None else "none" for y in lumas(start - 2, start + 70)]
+        r = runs(seq)
+        print("auto take", r, "missed", http("GET", "/api/v1/outputs/0")["stream_missed"])
+        assert runs(from_first(seq, "light")) == [("light", FPS), ("dark", FPS)], r
+        # Nothing on air: a cue goes on air by itself once it is loaded, no take.
+        wait_state("idle", timeout=3)
+        playout({"action": "cue", "item_id": light["id"], "end": "stop"})
+        wait_state("playing", timeout=3)
+        wait_state("idle", timeout=3)
+        st = http("PATCH", "/api/v1/outputs/0", {"auto_take": False})
+        assert not st["playout"]["auto_take"], st["playout"]
+        try:
+            http("PATCH", "/api/v1/outputs/0", {"auto_take": "yes"})
+            raise SystemExit("auto_take 'yes' accepted")
+        except urllib.error.HTTPError as e:
+            assert e.code == 400, e.code
+        wait_state("idle", timeout=3)
+
         # The clip level: measured after the upload (EBU R128), a gain applied while it plays (no
         # conversion), and the automatic level to -23 LUFS.
         deadline = time.time() + 30

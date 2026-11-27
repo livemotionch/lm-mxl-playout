@@ -21,6 +21,10 @@ The Livemotion fork of mxl-test-player 1.3.3 as a media playout. See README "Pla
 - An upload FFmpeg cannot read fails at once with the reason; before, its conversion failed.
 - The image needs `libavfilter` (in the FFmpeg runtime already; `libavfilter-dev` to build). `/data/library` and `/config` belong to uid 1000, so new volumes are writable.
 
+### Auto take
+
+- Per output (`PLAYER_AUTO_TAKE`, `auto_take` in the configuration file and in `PATCH /api/v1/outputs/{id}`, Playout tab "Auto take", kept in the state file): when the clip on air is done, the cued clip goes on air by itself with its own transition (a mix or dip starts that many frames before the end, as in a playlist). It applies to a clip that stops or holds, and to one already held or gone to black; a clip that loops loops on until a take. A cued clip still loading holds the last frame until it is ready. With nothing on air a cue goes on air once it is loaded instead of parking. The next clip shows "auto".
+
 ### Clip level
 
 - **Measured at the upload.** A background thread measures the loudness of each clip with audio (ffmpeg `ebur128`, the first audio stream): `level` in the item has the integrated loudness, the true peak and the loudness range. Items from before are measured at the first start.

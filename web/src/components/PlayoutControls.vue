@@ -112,6 +112,7 @@ function transitionText(l) {
       <template v-if="next">
         <span class="name" :title="next.name">{{ next.name }}</span>
         <span class="pill" :class="next.ready ? 'ok' : 'warn'">{{ next.ready ? "ready" : "loading" }}</span>
+        <span v-if="po.auto_take && prog?.end !== 'loop'" class="pill neutral" title="Auto take: it goes on air when the clip on air is done">auto</span>
         <span class="muted small">{{ transitionText(next) }}<template v-if="next.frames"> · {{ fmtClock(next.frames / fps, fps) }}</template></span>
         <span class="spacer"></span>
         <button v-if="!compact" class="btn small secondary" title="Remove the next clip" @click="clearNext">Clear</button>

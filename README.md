@@ -61,6 +61,7 @@ Precedence is environment, then the JSON file (`--config`, else `PLAYER_CONFIG`,
 | `PLAYER_RAM_BUDGET_MB` | `4096` | One RAM budget for the whole process: every output's clips in RAM (videos up to `PLAYER_RAM_CLIP_MAX_S`, GIF and APNG clips; shared between outputs that play the same clip). Also bounds an animation's conversion |
 | `PLAYER_PREROLL_FRAMES` | `25` | Frames decoded ahead when a video streams from its mezzanine (longer than `PLAYER_RAM_CLIP_MAX_S` or over the RAM budget) |
 | `PLAYER_CUE_MODE` | `park` | A clip cued while nothing is on air: `park` (on air at its first frame, paused) or `background` (air stays black until the take). Per output `cue_mode` in the configuration file, or `PATCH /api/v1/outputs/{id}` |
+| `PLAYER_AUTO_TAKE` | `false` | Auto take: when the clip on air is done (its end, also one that holds or stops; or already held or black) the cued clip goes on air by itself with its own transition, a mix starting before the end. A looping clip loops until a take. With nothing on air a cue goes on air once it is loaded instead of parking. Per output `auto_take` in the configuration file, `PATCH /api/v1/outputs/{id}` or the Playout tab |
 | `PLAYER_FONT_DIR` | bundled | Font directory |
 | `PLAYER_WEB_ROOT` | bundled | Built web UI |
 | `PLAYER_UPLOAD_LIMIT_GB` | `20` | Upload limit |
@@ -117,7 +118,7 @@ Precedence is environment, then the JSON file (`--config`, else `PLAYER_CONFIG`,
 | GET | `/widgets`, `/widget/transport?output=<n>`, `/widget/shotbox?output=<n>`, `/widget/rundown?output=<n>[&playlist=<id>]`, each `[&theme=dark\|light\|transparent]` (below) |
 | GET, PATCH | `/x-nmos/node/v1.3/…`, `/x-nmos/connection/v1.1/single/senders/{id}/staged` on `NMOS_PORT` |
 
-`POST /api/v1/outputs/{id}/playout` takes `{"action": …}`, effective at the next frame the output writes, and answers the output's status (its `playout` object: `state` idle, parked, playing, paused, ended, waiting, transition or fading; `program`, `incoming`, `next` with name, entry, position, frames, `remaining_s` and `ready`; `transition`; `playlist` with `remaining_s`; `cue_mode`):
+`POST /api/v1/outputs/{id}/playout` takes `{"action": …}`, effective at the next frame the output writes, and answers the output's status (its `playout` object: `state` idle, parked, playing, paused, ended, waiting, transition or fading; `program`, `incoming`, `next` with name, entry, position, frames, `remaining_s` and `ready`; `transition`; `playlist` with `remaining_s`; `cue_mode`; `auto_take`):
 
 | Action | Body |
 | --- | --- |

@@ -63,6 +63,7 @@ public:
     // effect at. Returns what `fn` returns.
     bool playout(const std::function<bool(Playout&, std::int64_t now)>& fn);
     void set_cue_mode(CueMode m);
+    void set_auto_take(bool on);
     // The library changed (a conversion finished): media that was not ready is loaded again.
     void library_changed();
     std::vector<std::uint8_t> thumbnail() const;
