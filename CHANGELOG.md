@@ -21,6 +21,13 @@ The Livemotion fork of mxl-test-player 1.3.3 as a media playout. See README "Pla
 - An upload FFmpeg cannot read fails at once with the reason; before, its conversion failed.
 - The image needs `libavfilter` (in the FFmpeg runtime already; `libavfilter-dev` to build). `/data/library` and `/config` belong to uid 1000, so new volumes are writable.
 
+### Clip level
+
+- **Measured at the upload.** A background thread measures the loudness of each clip with audio (ffmpeg `ebur128`, the first audio stream): `level` in the item has the integrated loudness, the true peak and the loudness range. Items from before are measured at the first start.
+- **A gain per clip, at playout.** `gain_db` (−40 to +20 dB) is applied by every output while the clip plays, ramped across one grain when it changes, so it is heard at once and needs no conversion. `PATCH /api/v1/library/{id}` with `gain_db`, `loudness` or `measure`.
+- **Automatic to −23 LUFS.** `loudness: true` sets the gain from the measurement to `PLAYER_LOUDNESS_TARGET` (−23), lowered so the true peak stays at or below −1 dBTP. The upload's "Level to −23 LUFS" is on by default in the UI. `loudness` was a loudnorm in the conversion before: an item converted with it is converted again, once.
+- Library: a Level column (the loudness it plays at and its gain) and a Level dialog (measurement, gain slider, automatic, measure again). `GET /api/v1/outputs/{id}/meters`.
+
 ### Changed defaults (breaking)
 
 - Uploads play as uploaded (above); the ProRes conversion only when asked for.

@@ -10,6 +10,9 @@
 #include "v210.hpp"
 
 #include <algorithm>
+#include <cmath>
+#include <cstring>
+#include <limits>
 #include <chrono>
 #include <cstdio>
 #include <filesystem>
@@ -62,6 +65,20 @@ LibraryItem item_from_json(const json& el) {
     it.map_channels = el.value("map_channels", 0);
     it.conversions = el.value("conversions", json::object());
     it.direct = el.value("direct", false);
+    it.gain_db = std::clamp(el.value("gain_db", 0.0), kGainMinDb, kGainMaxDb);
+    it.level = el.value("level", json::object());
+    if (!el.contains("level")) {
+        // Before the clip level (2.2.0): `loudness` was a loudnorm in the conversion. It is the
+        // gain now, so a conversion made with it is made again (else it plays at twice the gain).
+        if (it.loudness && !it.direct) {
+            for (auto el : it.conversions.items()) el.value() = json::object();
+            log_info("library: " + it.name + " is converted again: loudness is a gain at playout now");
+        }
+    }
+    const auto status = it.level.value("status", "");
+    // Measured at the next start (an item from before 2.2.0, or one the last run measured).
+    if (status.empty() || status == "measuring")
+        it.level = json{{"status", it.original.value("audio_codec", "").empty() ? "none" : "queued"}};
     return it;
 }
 
@@ -156,7 +173,7 @@ ItemType parse_item_type(std::string_view s) {
 }
 
 bool needs_conversion(const LibraryItem& it) {
-    return it.loudness || it.fps_mode == "motion" || it.crossfade_ms > 0 || it.map_channels > 0;
+    return it.fps_mode == "motion" || it.crossfade_ms > 0 || it.map_channels > 0;
 }
 
 json direct_entry(const LibraryItem& it, const VideoFormat& format, int ram_budget_mb) {
@@ -285,6 +302,7 @@ void Library::start() {
     const int n = std::max(1, cfg_.convert_concurrency);
     for (int i = 0; i < n; ++i) workers_.emplace_back([this] { worker(); });
     if (!cfg_.import_dir.empty()) watcher_ = std::thread([this] { watch_import(); });
+    measurer_ = std::thread([this] { measurer(); });
 }
 
 void Library::stop() {
@@ -297,6 +315,7 @@ void Library::stop() {
         if (t.joinable()) t.join();
     workers_.clear();
     if (watcher_.joinable()) watcher_.join();
+    if (measurer_.joinable()) measurer_.join();
 }
 
 void Library::load_index() {
@@ -383,6 +402,9 @@ nlohmann::json Library::to_json(const LibraryItem& it) const {
                 {"fps_mode", it.fps_mode},
                 {"alpha_mode", it.alpha_mode},
                 {"loudness", it.loudness},
+                {"gain_db", it.gain_db},
+                {"level", it.level},
+                {"loudness_target_lufs", cfg_.loudness_target_lufs},
                 {"crossfade_ms", it.crossfade_ms},
                 {"map_channels", it.map_channels},
                 {"conversions", it.conversions},
@@ -494,6 +516,8 @@ LibraryItem Library::ingest_file(const std::string& path, const std::string& nam
     it.fps_mode = options.value("fps_mode", "drop");
     it.alpha_mode = options.value("alpha_mode", "straight");
     it.loudness = options.value("loudness", false);
+    if (options.contains("gain_db") && options.at("gain_db").is_number())
+        it.gain_db = std::clamp(options.at("gain_db").get<double>(), kGainMinDb, kGainMaxDb);
     it.crossfade_ms = options.value("crossfade_ms", 0);
     it.map_channels = options.value("map_channels", 0);
     // Played as uploaded, unless the upload asks for a conversion (or for what only one applies).
@@ -513,6 +537,7 @@ LibraryItem Library::ingest_file(const std::string& path, const std::string& nam
                        {"frames", vframes},
                        {"color_space", color_space},
                        {"video_duration", video_duration}};
+    it.level = json{{"status", acodec.empty() ? "none" : "queued"}};
     const auto dir = fs::path(item_dir(it.id));
     fs::create_directories(dir);
     const auto original = dir / it.original["filename"].get<std::string>();
@@ -559,12 +584,13 @@ bool Library::reconvert(const std::string& id, const nlohmann::json& options, co
         if (options.contains("fps_mode")) it.fps_mode = options.at("fps_mode").get<std::string>();
         if (options.contains("alpha_mode")) it.alpha_mode = options.at("alpha_mode").get<std::string>();
         if (options.contains("loudness")) it.loudness = options.at("loudness").get<bool>();
+        if (it.loudness) it.gain_db = auto_gain(it);
         if (options.contains("crossfade_ms")) it.crossfade_ms = options.at("crossfade_ms").get<int>();
         if (options.contains("map_channels")) it.map_channels = options.at("map_channels").get<int>();
         // {"direct": true}: play the original again (when no option needs a conversion).
         if (options.value("direct", false)) {
             if (needs_conversion(it)) {
-                error = "loudness, motion interpolation, a crossfade or a channel mapping needs a conversion";
+                error = "motion interpolation, a crossfade or a channel mapping needs a conversion";
                 return false;
             }
             for (const auto& j : jobs_)
@@ -956,8 +982,8 @@ bool Library::convert_one(LibraryItem& item, const VideoFormat& format, ConvertJ
         }
         const int dst_ch = item.map_channels > 0 ? item.map_channels : std::max(2, item.original.value("audio_channels", 0));
         const int use_ch = std::clamp(dst_ch, 2, 64);
-        std::string af = "aresample=48000";
-        if (item.loudness) af = "loudnorm=I=-23:TP=-1.5:LRA=11," + af;
+        // The level is a gain at playout (Library::set_level), not part of the conversion.
+        const std::string af = "aresample=48000";
         const auto raw = dir / "audio.f32le";
         auto ar = run_process({"ffmpeg", "-hide_banner", "-y", "-i", original.string(), "-vn", "-af", af, "-f", "f32le", "-ac",
                                std::to_string(std::max(1, item.original.value("audio_channels", 0) == 0 ? 1 : item.original.value("audio_channels", 1))),
@@ -1046,6 +1072,141 @@ void Library::watch_import() {
             }
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+    }
+}
+
+bool parse_ebur128(const std::string& log, json& out) {
+    const auto summary = log.rfind("Summary:");
+    if (summary == std::string::npos) return false;
+    auto value = [&](const char* label, double& v) {
+        const auto at = log.find(label, summary);
+        if (at == std::string::npos) return false;
+        const char* p = log.c_str() + at + std::strlen(label);
+        while (*p == ' ') ++p;
+        if (std::strncmp(p, "-inf", 4) == 0) {
+            v = -std::numeric_limits<double>::infinity();
+            return true;
+        }
+        char* end = nullptr;
+        v = std::strtod(p, &end);
+        return end != p;
+    };
+    double i = 0, lra = 0, peak = 0;
+    if (!value("I:", i)) return false;
+    if (!value("LRA:", lra)) lra = 0;
+    if (!value("Peak:", peak)) peak = -std::numeric_limits<double>::infinity();
+    out = json{{"integrated_lufs", i}, {"lra_lu", lra}};
+    // Silence (gated away): no loudness to bring to the target.
+    if (i <= -70 || !std::isfinite(i)) out["silent"] = true;
+    out["true_peak_dbtp"] = std::isfinite(peak) ? json(peak) : json(nullptr);
+    return true;
+}
+
+double gain_to_target(double integrated_lufs, double true_peak_dbtp, double target, bool* limited) {
+    double g = target - integrated_lufs;
+    bool lim = false;
+    if (std::isfinite(true_peak_dbtp) && true_peak_dbtp + g > -1.0) {
+        g = -1.0 - true_peak_dbtp;
+        lim = true;
+    }
+    if (limited) *limited = lim;
+    return std::clamp(g, kGainMinDb, kGainMaxDb);
+}
+
+double Library::auto_gain(const LibraryItem& it) const {
+    const auto& l = it.level;
+    if (l.value("status", "") != "ready" || l.value("silent", false) || !l.contains("integrated_lufs")) return it.gain_db;
+    const double peak = l.contains("true_peak_dbtp") && l["true_peak_dbtp"].is_number() ? l["true_peak_dbtp"].get<double>()
+                                                                                       : -std::numeric_limits<double>::infinity();
+    return gain_to_target(l["integrated_lufs"].get<double>(), peak, cfg_.loudness_target_lufs);
+}
+
+bool Library::set_level(const std::string& id, const json& body, std::string& error) {
+    {
+        std::lock_guard lock(mu_);
+        auto found = std::find_if(items_.begin(), items_.end(), [&](const LibraryItem& it) { return it.id == id; });
+        if (found == items_.end()) {
+            error = "not found";
+            return false;
+        }
+        auto& it = *found;
+        if (body.contains("gain_db")) {
+            const auto& g = body.at("gain_db");
+            if (!g.is_number() || !(g.get<double>() >= kGainMinDb && g.get<double>() <= kGainMaxDb)) {
+                error = "gain_db must be a number from -40 to 20";
+                return false;
+            }
+        }
+        if (body.contains("loudness") && !body.at("loudness").is_boolean()) {
+            error = "loudness must be true or false";
+            return false;
+        }
+        if (body.value("measure", false)) {
+            if (it.original.value("audio_codec", "").empty()) {
+                error = "the clip has no audio";
+                return false;
+            }
+            it.level = json{{"status", "queued"}};
+        }
+        if (body.contains("gain_db")) {
+            it.gain_db = body.at("gain_db").get<double>();
+            it.loudness = false;
+        }
+        if (body.contains("loudness")) it.loudness = body.at("loudness").get<bool>();
+        if (it.loudness) it.gain_db = auto_gain(it);
+        save_item(it);
+        save_index();
+    }
+    if (on_change) on_change();
+    return true;
+}
+
+// Measures one clip at a time (EBU R128, ffmpeg's ebur128 filter on the first audio stream):
+// the audio only, so it takes a few seconds per hour of a file.
+void Library::measurer() {
+    while (!stop_) {
+        std::string id, path, name;
+        {
+            std::lock_guard lock(mu_);
+            for (auto& it : items_) {
+                if (it.level.value("status", "") != "queued") continue;
+                it.level["status"] = "measuring";
+                id = it.id;
+                name = it.name;
+                path = (fs::path(item_dir(it.id)) / it.original.value("filename", "original.bin")).string();
+                break;
+            }
+        }
+        if (id.empty()) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            continue;
+        }
+        if (on_change) on_change();
+        const auto t0 = std::chrono::steady_clock::now();
+        auto r = run_process({"ffmpeg", "-hide_banner", "-nostats", "-nostdin", "-i", path, "-map", "0:a:0", "-vn", "-sn", "-dn", "-af",
+                              "ebur128=peak=true:framelog=quiet", "-f", "null", "-"});
+        json level;
+        if (r.code == 0 && parse_ebur128(r.output, level)) {
+            level["status"] = "ready";
+            level["seconds"] = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+        } else {
+            auto tail = r.output.size() > 400 ? r.output.substr(r.output.size() - 400) : r.output;
+            level = json{{"status", "failed"}, {"error", stop_ ? "stopped" : "the loudness could not be measured: " + tail}};
+            if (stop_) level = json{{"status", "queued"}};
+        }
+        {
+            std::lock_guard lock(mu_);
+            for (auto& it : items_) {
+                if (it.id != id) continue;
+                if (it.level.value("status", "") != "measuring") break;  // measured again meanwhile
+                it.level = level;
+                if (it.loudness) it.gain_db = auto_gain(it);
+                save_item(it);
+                save_index();
+                log_info("library: " + name + " loudness " + (level.value("status", "") == "ready" ? std::to_string(level.value("integrated_lufs", 0.0)) + " LUFS, gain " + std::to_string(it.gain_db) + " dB" : level.value("error", "")));
+            }
+        }
+        if (on_change) on_change();
     }
 }
 

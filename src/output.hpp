@@ -20,6 +20,7 @@
 #include <mutex>
 #include <string>
 #include <thread>
+#include <unordered_map>
 #include <vector>
 
 namespace mtp {
@@ -154,6 +155,11 @@ private:
     SourceDesc load_src_;
     bool load_override_ = false;
     std::atomic<std::shared_ptr<const Media>> published_;
+    // Each library item's gain (linear, only those not 0 dB), applied to its sound at playout:
+    // set from the library (refresh_gains), so a level change is heard at once.
+    using Gains = std::unordered_map<std::string, float>;
+    std::atomic<std::shared_ptr<const Gains>> gains_{std::make_shared<const Gains>()};
+    void refresh_gains();
 
     std::atomic<bool> stop_{false};
     std::atomic<bool> master_v_{true};

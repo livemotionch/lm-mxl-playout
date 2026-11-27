@@ -185,6 +185,14 @@ Output::Output(int index, OutputConfig cfg, VideoFormat platform, MxlSession& mx
     source_.audio = "sine";
     playout_.set_cue_mode(cfg_.cue_mode);
     for (int i = 0; i < 2; ++i) decoders_[i] = std::make_unique<StreamDecoder>(index_, preroll_frames_);
+    refresh_gains();
+}
+
+void Output::refresh_gains() {
+    auto g = std::make_shared<Gains>();
+    for (const auto& it : library_.list())
+        if (it.gain_db != 0) (*g)[it.id] = static_cast<float>(dbfs_to_lin(it.gain_db));
+    gains_.store(std::move(g));
 }
 
 Output::~Output() { join(); }
@@ -687,6 +695,7 @@ void Output::writer_main() {
     OverlayRenderer overlay(font_dir_);
     std::uint64_t last_index = 0;
     bool have_last = false;
+    std::unordered_map<std::string, float> applied_gain;  // the level each clip was last played at (ramps a change)
     MezzanineReader reader;
     std::string reader_path;
     std::int64_t last_loop_index = 0;
@@ -1334,13 +1343,28 @@ void Output::writer_main() {
         std::vector<float> planar(static_cast<std::size_t>(channels) * count, 0.f);
         const bool silence = idle || (transport == "pause" && cfg.pause_audio == PauseAudio::Silence) ||
                              (src.type == "still" && src.audio == "silence");
+        // The clip's level (Library: gain_db): a change ramps across one grain, so it does not click.
+        const auto gains = gains_.load();
+        auto level_ramp = [&](const std::string& item) {
+            const auto found = gains->find(item);
+            const float target = found == gains->end() ? 1.f : found->second;
+            auto [at, fresh] = applied_gain.try_emplace(item, target);
+            const float from = at->second;
+            at->second = target;
+            return std::pair<float, float>{from, target};
+        };
+        if (applied_gain.size() > 64) applied_gain.clear();
         if (playout_mode) {
             // Each rolling clip's sound times its gain, ramped across the grain (a mix has no steps).
             // Paused, parked, held and ended clips are silent.
             auto add = [&](const Shown& l, const Pic& p, const LayerView& v, double g0, double g1) {
                 const auto& m = l.media;
                 if (!m || !m->ready || !v.rolling || (g0 <= 0 && g1 <= 0)) return;
-                auto gain = [&](std::uint32_t i) { return static_cast<float>(g0 + (g1 - g0) * (static_cast<double>(i) + 0.5) / static_cast<double>(count)); };
+                const auto [l0, l1] = level_ramp(m->item_id);
+                auto gain = [&](std::uint32_t i) {
+                    const double x = (static_cast<double>(i) + 0.5) / static_cast<double>(count);
+                    return static_cast<float>((g0 + (g1 - g0) * x) * (l0 + (l1 - l0) * x));
+                };
                 if (m->ram && m->clip.channels > 0 && m->clip.audio_samples > 0) {
                     std::uint64_t offset = samples_until_grain(static_cast<std::uint64_t>(std::max<std::int64_t>(0, v.frame)), fmt.frame_rate);
                     if (field == 1) offset += samples_in_grain(abs_frame * 2, gr);
@@ -1374,11 +1398,13 @@ void Output::writer_main() {
             std::uint64_t offset = base;
             if (field == 1) offset += samples_in_grain(abs_frame * 2, gr);
             const int sch = media->clip.channels;
+            const auto [l0, l1] = level_ramp(media->item_id);
             for (std::uint32_t i = 0; i < count; ++i) {
                 const std::uint64_t s = (offset + i) % media->clip.audio_samples;
+                const float g = l0 + (l1 - l0) * (static_cast<float>(i) + 0.5f) / static_cast<float>(count);
                 for (int c = 0; c < channels; ++c) {
                     float v = 0;
-                    if (c < sch) v = media->clip.audio[s * static_cast<std::uint64_t>(sch) + c];
+                    if (c < sch) v = g * media->clip.audio[s * static_cast<std::uint64_t>(sch) + c];
                     planar[static_cast<std::size_t>(c) * count + i] = v;
                 }
             }
@@ -1388,9 +1414,11 @@ void Output::writer_main() {
             if (field == 1) offset = samples_in_grain(abs_frame * 2, gr);
             const int sch = streamed->channels;
             const auto have = static_cast<std::uint32_t>(streamed->audio.size() / static_cast<std::size_t>(sch));
+            const auto [l0, l1] = level_ramp(media->item_id);
             for (std::uint32_t i = 0; i < count && offset + i < have; ++i) {
+                const float g = l0 + (l1 - l0) * (static_cast<float>(i) + 0.5f) / static_cast<float>(count);
                 for (int c = 0; c < channels && c < sch; ++c) {
-                    planar[static_cast<std::size_t>(c) * count + i] = streamed->audio[static_cast<std::size_t>(offset + i) * static_cast<std::size_t>(sch) + c];
+                    planar[static_cast<std::size_t>(c) * count + i] = g * streamed->audio[static_cast<std::size_t>(offset + i) * static_cast<std::size_t>(sch) + c];
                 }
             }
         } else if (!silence && src.type == "still") {
@@ -1571,6 +1599,7 @@ void Output::command(const std::string& action) {
 }
 
 void Output::library_changed() {
+    refresh_gains();  // before mu_: the library is never asked under it
     std::lock_guard lock(mu_);
     const auto media = published_.load();
     const SourceDesc& src = load_override_ ? load_src_ : source_;

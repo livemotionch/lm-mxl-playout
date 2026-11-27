@@ -72,7 +72,6 @@ function openEdit(item, mode) {
       fit: item.fit,
       fps_mode: item.fps_mode,
       alpha_mode: item.alpha_mode,
-      loudness: item.loudness,
       crossfade_ms: item.crossfade_ms,
       map_channels: item.map_channels,
       direct: !!item.direct,
@@ -104,6 +103,55 @@ async function remove(item) {
   if (await act(() => api.del(`/api/v1/library/${encodeURIComponent(item.id)}`))) refreshLists();
 }
 const playTarget = computed(() => selectedOutput.value);
+
+// Level: the measured loudness (EBU R128) and the gain the outputs apply while the clip plays.
+// A change is sent at once (heard on air), the automatic level brings the clip to the target.
+const fmtDb = (v, unit) => (typeof v === "number" ? `${v > 0 ? "+" : v < 0 ? "−" : ""}${Math.abs(v).toFixed(1)} ${unit}` : "–");
+const fmtLufs = (v) => (typeof v === "number" ? `${v < 0 ? "−" : ""}${Math.abs(v).toFixed(1)} LUFS` : "–");
+const LEVEL_KIND = { ready: "ok", queued: "neutral", measuring: "warn", failed: "bad", none: "neutral" };
+function levelText(item) {
+  const l = item.level || {};
+  if (l.status === "none") return "no audio";
+  if (l.status === "ready" && l.silent) return "silent";
+  if (l.status !== "ready") return l.status || "–";
+  return fmtLufs(l.integrated_lufs + (item.gain_db || 0));
+}
+const levelDialog = ref(null);
+const level = ref(null); // { item, gain, auto }
+let levelTimer = null;
+function openLevel(item) {
+  level.value = { id: item.id, gain: item.gain_db || 0, auto: !!item.loudness };
+  levelDialog.value.showModal();
+}
+const levelItem = computed(() => level.value && (itemsById.value?.[level.value.id] || live.library.find((i) => i.id === level.value.id)));
+// The dialog follows the item (a measurement done, the automatic gain set by the server).
+watch(levelItem, (it) => {
+  if (!it || !level.value || levelTimer) return;
+  level.value.auto = !!it.loudness;
+  if (it.loudness) level.value.gain = it.gain_db || 0;
+});
+async function sendLevel(body) {
+  const ok = await act(() => api.patch(`/api/v1/library/${encodeURIComponent(level.value.id)}`, body));
+  if (ok) refreshLists();
+}
+function onGain() {
+  level.value.auto = false;
+  clearTimeout(levelTimer);
+  levelTimer = setTimeout(() => {
+    levelTimer = null;
+    if (level.value) sendLevel({ gain_db: Math.max(-40, Math.min(20, Number(level.value.gain) || 0)) });
+  }, 150);
+}
+function onAuto() {
+  sendLevel(level.value.auto ? { loudness: true } : { loudness: false });
+}
+const levelResult = computed(() => {
+  const l = levelItem.value?.level;
+  if (!l || l.status !== "ready" || l.silent) return null;
+  const g = Number(level.value.gain) || 0;
+  const peak = typeof l.true_peak_dbtp === "number" ? l.true_peak_dbtp + g : null;
+  return { lufs: l.integrated_lufs + g, peak, over: peak !== null && peak > -1 };
+});
 </script>
 
 <template>
@@ -122,7 +170,7 @@ const playTarget = computed(() => selectedOutput.value);
       <Segmented v-model="uploads.options.alpha_mode" :options="ALPHA_MODES" label="Alpha" class="small" />
     </div>
     <div class="row tight">
-      <label class="check"><input v-model="uploads.options.loudness" type="checkbox" /> Loudness to −23 LUFS</label>
+      <label class="check" title="The loudness is measured after the upload and the clip's gain set to the target (no conversion)"><input v-model="uploads.options.loudness" type="checkbox" /> Level to −23 LUFS</label>
       <label for="up-xf" style="margin: 0">loop crossfade ms</label>
       <input id="up-xf" v-model.number="uploads.options.crossfade_ms" type="number" min="0" max="1000" style="width: 5.5rem" />
       <label for="up-ch" style="margin: 0" title="0 keeps the source channels">audio channels</label>
@@ -174,7 +222,7 @@ const playTarget = computed(() => selectedOutput.value);
     </div>
     <table v-if="rows.length">
       <thead>
-        <tr><th></th><th>Name</th><th>Original</th><th>Playback</th><th>Options</th><th>Used by</th><th></th></tr>
+        <tr><th></th><th>Name</th><th>Original</th><th>Playback</th><th>Level</th><th>Options</th><th>Used by</th><th></th></tr>
       </thead>
       <tbody>
         <tr v-for="item in rows" :key="item.id">
@@ -189,12 +237,20 @@ const playTarget = computed(() => selectedOutput.value);
           <td>
             <span v-for="(c, f) in item.conversions" :key="f" class="pill" :class="STATUS_KIND[c.status] || 'neutral'" :title="c.error || c.clip_error || ''">{{ f }} {{ c.direct && c.status === "ready" ? "direct" : c.status }}<template v-if="c.clip === false"> (sprite only)</template></span>
           </td>
-          <td class="small muted">{{ item.fit }} · {{ item.fps_mode }}<span v-if="item.type === 'still'"> · {{ item.alpha_mode }}</span><span v-if="item.loudness"> · −23 LUFS</span></td>
+          <td class="small">
+            <template v-if="item.type === 'video'">
+              <span class="pill" :class="LEVEL_KIND[item.level?.status] || 'neutral'" :title="item.level?.error || (item.level?.status === 'ready' && !item.level.silent ? `measured ${fmtLufs(item.level.integrated_lufs)}, true peak ${fmtDb(item.level.true_peak_dbtp, 'dBTP')}` : '')">{{ levelText(item) }}</span>
+              <span class="muted"> {{ fmtDb(item.gain_db || 0, "dB") }}<template v-if="item.loudness"> auto</template></span>
+            </template>
+            <span v-else class="muted">–</span>
+          </td>
+          <td class="small muted">{{ item.fit }} · {{ item.fps_mode }}<span v-if="item.type === 'still'"> · {{ item.alpha_mode }}</span></td>
           <td class="small">{{ usedBy(item).map((o) => o.label).join(", ") || "–" }}</td>
           <td class="actions-cell">
             <button v-if="playTarget" class="btn small" @click="playItem(playTarget.index, item)">Play on {{ outputLabel(playTarget.index) }}</button>
             <button class="btn small secondary" @click="openEdit(item, 'edit')">Edit</button>
             <button class="btn small secondary" @click="openEdit(item, 'reconvert')">Playback</button>
+            <button v-if="item.type === 'video' && item.level?.status !== 'none'" class="btn small secondary" @click="openLevel(item)">Level</button>
             <button class="btn small danger" @click="remove(item)">Delete</button>
           </td>
         </tr>
@@ -218,7 +274,7 @@ const playTarget = computed(() => selectedOutput.value);
         <Segmented v-model="editing.options.direct" :options="PLAY_MODES" label="Play" class="small" />
         <p class="note">
           <template v-if="editing.options.direct && !needsConversion(editing.options)">The original plays as uploaded, decoded while it plays (a conversion's files are deleted).</template>
-          <template v-else>The original is converted again for each output format with these options<template v-if="editing.options.direct">: loudness, motion interpolation, a crossfade or a channel mapping needs a conversion</template>.</template>
+          <template v-else>The original is converted again for each output format with these options<template v-if="editing.options.direct">: motion interpolation, a crossfade or a channel mapping needs a conversion</template>.</template>
         </p>
         <label>Aspect</label>
         <Segmented v-model="editing.options.fit" :options="FITS" label="Aspect" class="small" />
@@ -226,7 +282,6 @@ const playTarget = computed(() => selectedOutput.value);
         <Segmented v-model="editing.options.fps_mode" :options="FPS_MODES" label="Frame rate" class="small" />
         <label>Alpha</label>
         <Segmented v-model="editing.options.alpha_mode" :options="ALPHA_MODES" label="Alpha" class="small" />
-        <label class="check"><input v-model="editing.options.loudness" type="checkbox" /> Loudness to −23 LUFS</label>
         <div class="row">
           <div><label for="ed-xf">Loop crossfade (ms)</label><input id="ed-xf" v-model.number="editing.options.crossfade_ms" type="number" min="0" max="1000" /></div>
           <div><label for="ed-ch">Audio channels (0 keeps)</label><input id="ed-ch" v-model.number="editing.options.map_channels" type="number" min="0" max="64" /></div>
@@ -235,6 +290,33 @@ const playTarget = computed(() => selectedOutput.value);
       <div class="actions">
         <button class="btn secondary" @click="dialog.close()">Cancel</button>
         <button class="btn" :disabled="editing.mode === 'edit' && !editing.name.trim()" @click="saveEdit">{{ editing.mode === "edit" ? "Save" : editing.options.direct && !needsConversion(editing.options) ? "Play direct" : "Convert" }}</button>
+      </div>
+    </template>
+  </dialog>
+
+  <dialog ref="levelDialog" @close="level = null">
+    <template v-if="level && levelItem">
+      <h3>Level of {{ levelItem.name }}</h3>
+      <p class="note" v-if="levelItem.level?.status === 'ready' && !levelItem.level.silent">
+        Measured (EBU R128): {{ fmtLufs(levelItem.level.integrated_lufs) }}, true peak {{ fmtDb(levelItem.level.true_peak_dbtp, "dBTP") }}, range {{ (levelItem.level.lra_lu ?? 0).toFixed(1) }} LU.
+      </p>
+      <p class="note" v-else-if="levelItem.level?.status === 'ready'">The clip is silent: there is no loudness to set.</p>
+      <p class="note" v-else-if="levelItem.level?.status === 'failed'"><span class="msg err">{{ levelItem.level.error }}</span></p>
+      <p class="note" v-else>Measuring the loudness…</p>
+      <label class="check"><input v-model="level.auto" type="checkbox" @change="onAuto" /> Automatic: {{ fmtLufs(levelItem.loudness_target_lufs ?? -23) }}, true peak at most −1 dBTP</label>
+      <label for="lv-gain">Gain (dB)</label>
+      <div class="row tight">
+        <input id="lv-gain" v-model.number="level.gain" type="range" min="-40" max="20" step="0.5" class="grow" aria-label="Gain" @input="onGain" />
+        <input v-model.number="level.gain" type="number" min="-40" max="20" step="0.1" style="width: 5.5rem" aria-label="Gain in dB" @input="onGain" />
+      </div>
+      <p class="note" v-if="levelResult">
+        Plays at {{ fmtLufs(levelResult.lufs) }}<template v-if="levelResult.peak !== null">, true peak {{ fmtDb(levelResult.peak, "dBTP") }}</template>.
+        <span v-if="levelResult.over" class="msg err">The peaks go over −1 dBTP.</span>
+      </p>
+      <p class="note">The gain applies on every output at once, also while the clip is on air. Nothing is converted.</p>
+      <div class="actions">
+        <button class="btn secondary" :disabled="['queued', 'measuring'].includes(levelItem.level?.status)" @click="sendLevel({ measure: true })">Measure again</button>
+        <button class="btn" @click="levelDialog.close()">Done</button>
       </div>
     </template>
   </dialog>

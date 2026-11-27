@@ -748,6 +748,13 @@ void App::Impl::handle(const HttpRequest& req, HttpResponse& res) {
                 res.body = std::move(jpg);
                 return;
             }
+            if (leaf == "meters" && req.method == "GET") {
+                // The peak of each audio channel in the last grain (linear, 1 = full scale).
+                json peaks = json::array();
+                for (float p : o->meters()) peaks.push_back(p);
+                text(json{{"peaks", peaks}});
+                return;
+            }
             if (leaf == "probe" && req.method == "GET") {
                 const auto idx_s = query_get(req.query, "index");
                 const auto st = o->status();
@@ -833,6 +840,11 @@ void App::Impl::handle(const HttpRequest& req, HttpResponse& res) {
                 std::string err;
                 auto cur = library.get(id);
                 if (!b.contains("tags")) tags = cur.tags;
+                // The clip's level: gain_db, loudness (to the target), measure.
+                if ((b.contains("gain_db") || b.contains("loudness") || b.contains("measure")) && !library.set_level(id, b, err)) {
+                    text(json{{"error", err}}, 400);
+                    return;
+                }
                 if (!library.update_meta(id, b.value("name", ""), tags, err)) {
                     text(json{{"error", err}}, 400);
                     return;

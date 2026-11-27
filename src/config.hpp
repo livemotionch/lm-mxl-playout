@@ -108,6 +108,7 @@ struct Config {
     int convert_concurrency = 1;
     int convert_threads = 2;
     int decode_threads = 4;
+    double loudness_target_lufs = -23;  // PLAYER_LOUDNESS_TARGET: a clip's automatic level
     double ram_clip_max_s = 20;
     int ram_budget_mb = 4096;
     int preroll_frames = 25;

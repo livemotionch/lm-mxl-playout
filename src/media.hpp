@@ -27,7 +27,14 @@ struct LibraryItem {
     std::string fit = "fit";
     std::string fps_mode = "drop";
     std::string alpha_mode = "straight";
+    // The clip's level: `gain_db` is applied at playout (no conversion), to every output. With
+    // `loudness` it is set from the measured loudness to the target (PLAYER_LOUDNESS_TARGET,
+    // -23 LUFS), lowered so the true peak stays at or below -1 dBTP.
     bool loudness = false;
+    double gain_db = 0;
+    // The loudness of the original (EBU R128): status (queued, measuring, ready, failed, none for
+    // no audio), integrated_lufs, true_peak_dbtp, lra_lu, error.
+    nlohmann::json level = nlohmann::json::object();
     int crossfade_ms = 0;
     int map_channels = 0;  // 0 = keep source, pad
     // Plays the original as it is (no conversion): its `conversions` entries say `direct`.
@@ -66,6 +73,11 @@ public:
     bool remove(const std::string& id, std::string& error);
     bool update_meta(const std::string& id, const std::string& name, const std::vector<std::string>& tags, std::string& error);
     void mark_used(const std::string& id, bool used);
+    // {"gain_db": dB} sets the gain by hand (and ends `loudness`); {"loudness": true} sets it to
+    // the target from the measurement, now or when the measurement is done. {"measure": true}
+    // measures the original again.
+    bool set_level(const std::string& id, const nlohmann::json& body, std::string& error);
+    double loudness_target() const { return cfg_.loudness_target_lufs; }
     void purge_uploads();
 
     void ensure_format(const std::string& id, const VideoFormat& format);
@@ -101,6 +113,9 @@ public:
 
 private:
     void worker();
+    void measurer();
+    // The gain that brings `it` to the target (its measurement ready), else its gain as it is.
+    double auto_gain(const LibraryItem& it) const;
     void watch_import();
     void load_index();
     void save_index() const;
@@ -114,6 +129,7 @@ private:
     std::vector<ConvertJob> jobs_;
     std::vector<std::thread> workers_;
     std::thread watcher_;
+    std::thread measurer_;
     std::atomic<bool> stop_{false};
     std::uint64_t bytes_ = 0;
     std::uint64_t job_serial_ = 0;
@@ -128,7 +144,16 @@ private:
 
 const char* item_type_name(ItemType t);
 
-// Options that only a conversion can apply (loudness, motion interpolation, a crossfade at the
+// The gain range of a clip, in dB.
+constexpr double kGainMinDb = -40, kGainMaxDb = 20;
+// The summary of ffmpeg's ebur128 filter (peak=true) in `log`: integrated_lufs, true_peak_dbtp,
+// lra_lu. False when there is none (no audio, or silence: integrated -70 LUFS or below).
+bool parse_ebur128(const std::string& log, nlohmann::json& out);
+// The gain to `target` LUFS from a measurement, lowered so the true peak stays at -1 dBTP or
+// below, within kGainMinDb..kGainMaxDb. `limited` tells whether the peak lowered it.
+double gain_to_target(double integrated_lufs, double true_peak_dbtp, double target, bool* limited = nullptr);
+
+// Options that only a conversion can apply (motion interpolation, a crossfade at the
 // loop, a channel mapping): with any of them an item is converted, else it plays direct.
 bool needs_conversion(const LibraryItem& it);
 // The `conversions` entry of a direct item at `format` (frames, audio channels, alpha). An

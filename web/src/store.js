@@ -94,7 +94,7 @@ export const patchOutput = (index, body) => outputCall("patch", index, "", body)
 
 /** Options only a conversion applies: with any of them an item is converted, else it plays as uploaded. */
 export function needsConversion(o) {
-  return !!o.loudness || o.fps_mode === "motion" || Number(o.crossfade_ms) > 0 || Number(o.map_channels) > 0;
+  return o.fps_mode === "motion" || Number(o.crossfade_ms) > 0 || Number(o.map_channels) > 0;
 }
 
 /** Item length in frames at an output's format (0 while it is not converted for it). */
@@ -218,7 +218,7 @@ export async function refreshNmos() {
 // ---- uploads (chunked, §6.1); they go on while other tabs are open --------------
 
 export const uploads = reactive({
-  options: { fit: "fit", fps_mode: "drop", alpha_mode: "straight", loudness: false, crossfade_ms: 0, map_channels: 0, convert: false, tags: "" },
+  options: { fit: "fit", fps_mode: "drop", alpha_mode: "straight", loudness: true, crossfade_ms: 0, map_channels: 0, convert: false, tags: "" },
   files: [], // { name, size, sent, state: sending | ingesting | done | failed, error, item }
 });
 

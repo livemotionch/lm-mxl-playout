@@ -295,6 +295,45 @@ def main():
             print("other format", r, "missed", http("GET", "/api/v1/outputs/0")["stream_missed"])
             assert runs(from_first(seq, "dark")) == [("dark", FPS), ("mid", FPS), ("light", FPS)], r
 
+        # The clip level: measured after the upload (EBU R128), a gain applied while it plays (no
+        # conversion), and the automatic level to -23 LUFS.
+        deadline = time.time() + 30
+        while (lv := http("GET", f"/api/v1/library/{light['id']}")["level"])["status"] in ("queued", "measuring"):
+            assert time.time() < deadline, lv
+            time.sleep(0.2)
+        assert lv["status"] == "ready" and -24 < lv["integrated_lufs"] < -12, lv
+        playout({"action": "cue", "item_id": light["id"], "end": "loop", "take": True})
+        time.sleep(0.6)
+
+        def peak():
+            """The median grain peak over 0.6 s (the loop point of the AAC clip has a transient)."""
+            vals = []
+            for _ in range(15):
+                vals.append(max(http("GET", "/api/v1/outputs/0/meters")["peaks"]))
+                time.sleep(0.04)
+            return sorted(vals)[len(vals) // 2]
+
+        p0 = peak()
+        http("PATCH", f"/api/v1/library/{light['id']}", {"gain_db": -12})
+        time.sleep(0.3)
+        p1 = peak()
+        print("level", lv, "peak", round(p0, 4), "at -12 dB", round(p1, 4))
+        assert p0 > 0.05 and abs(p1 / p0 - 10 ** (-12 / 20)) < 0.03, (p0, p1)
+        item = http("PATCH", f"/api/v1/library/{light['id']}", {"loudness": True})
+        assert item["loudness"] and abs(lv["integrated_lufs"] + item["gain_db"] - (-23)) < 0.05, item
+        time.sleep(0.3)
+        p2 = peak()
+        print("automatic gain", item["gain_db"], "peak", round(p2, 4))
+        assert abs(p2 / p0 - 10 ** (item["gain_db"] / 20)) < 0.03, (p0, p2, item["gain_db"])
+        try:
+            http("PATCH", f"/api/v1/library/{light['id']}", {"gain_db": 99})
+            raise SystemExit("gain 99 dB accepted")
+        except urllib.error.HTTPError as e:
+            assert e.code == 400, e.code
+        http("PATCH", f"/api/v1/library/{light['id']}", {"gain_db": 0})
+        playout({"action": "stop"})
+        wait_state("idle")
+
         # Stop with a fade, then the status says idle; the API refuses an unknown action.
         playout({"action": "cue", "item_id": light["id"], "end": "loop", "take": True})
         time.sleep(0.5)

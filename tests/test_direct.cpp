@@ -16,6 +16,7 @@ extern "C" {
 }
 
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -282,12 +283,110 @@ TEST_CASE("an upload plays as it is: no conversion job, a direct entry per forma
     CHECK_FALSE(library.reconvert(item.id, {{"direct", true}}, fmt, err));  // its conversion is queued
     // An option only a conversion applies converts.
     std::filesystem::copy_file(clip, dir / "loud.mkv");
-    const auto loud = library.ingest_file((dir / "loud.mkv").string(), "loud", {{"loudness", true}}, fmt);
+    const auto loud = library.ingest_file((dir / "loud.mkv").string(), "loud", {{"fps_mode", "motion"}}, fmt);
     CHECK_FALSE(loud.direct);
     CHECK(library.get(loud.id).conversions.at(fmt.name).at("status") == "queued");
     // Not a media file: refused with a reason, not "ready".
     std::ofstream(dir / "junk.bin") << "not media";
     const auto junk = library.ingest_file((dir / "junk.bin").string(), "junk", nlohmann::json::object(), fmt);
     CHECK(library.get(junk.id).conversions.at(fmt.name).at("status") == "failed");
+    std::filesystem::remove_all(dir);
+}
+
+TEST_CASE("the loudness summary of ebur128 is read, and the gain to the target keeps the true peak at -1 dBTP") {
+    const std::string log = "[Parsed_ebur128_0 @ 0x1] Summary:\n\n  Integrated loudness:\n    I:         -18.3 LUFS\n    Threshold: -28.4 LUFS\n\n"
+                            "  Loudness range:\n    LRA:         4.2 LU\n    Threshold:  -38.0 LUFS\n\n  True peak:\n    Peak:       -6.5 dBFS\n";
+    nlohmann::json m;
+    REQUIRE(parse_ebur128(log, m));
+    CHECK(m.at("integrated_lufs") == doctest::Approx(-18.3));
+    CHECK(m.at("lra_lu") == doctest::Approx(4.2));
+    CHECK(m.at("true_peak_dbtp") == doctest::Approx(-6.5));
+    CHECK_FALSE(m.contains("silent"));
+    nlohmann::json quiet;
+    REQUIRE(parse_ebur128("Summary:\n    I:         -70.0 LUFS\n    LRA:   0.0 LU\n    Peak:       -inf dBFS\n", quiet));
+    CHECK(quiet.value("silent", false));
+    CHECK(quiet.at("true_peak_dbtp").is_null());
+    nlohmann::json none;
+    CHECK_FALSE(parse_ebur128("Output file is empty, nothing was encoded", none));
+
+    bool limited = true;
+    CHECK(gain_to_target(-18.3, -6.5, -23, &limited) == doctest::Approx(-4.7));
+    CHECK_FALSE(limited);
+    CHECK(gain_to_target(-35, -5, -23, &limited) == doctest::Approx(4));  // +12 would peak at +7 dBTP
+    CHECK(limited);
+    CHECK(gain_to_target(-90, -80, -23) == doctest::Approx(kGainMaxDb));
+    CHECK(gain_to_target(0, std::nan(""), -23) == doctest::Approx(-23));
+}
+
+TEST_CASE("a clip's level: gain by hand, the automatic level from the measurement, checked input, kept in the library") {
+    const auto dir = temp_dir("mtp-level");
+    const auto clip = (dir / "clip.mkv").string();
+    REQUIRE(write_clip(clip, true, true));
+    Config cfg;
+    cfg.library_dir = (dir / "library").string();
+    const VideoFormat fmt = *parse_format("720p25");
+    std::string id;
+    {
+        Library library(cfg);  // not started: the measurement stays queued
+        const auto item = library.ingest_file(clip, "clip.mkv", {{"loudness", true}}, fmt);
+        id = item.id;
+        CHECK(item.direct);  // the level needs no conversion
+        CHECK(library.get(id).level.at("status") == "queued");
+        CHECK(library.get(id).gain_db == 0);  // automatic, but not measured yet
+        std::string err;
+        REQUIRE(library.set_level(id, {{"gain_db", -6.5}}, err));
+        CHECK(library.get(id).gain_db == -6.5);
+        CHECK_FALSE(library.get(id).loudness);  // a gain by hand ends the automatic level
+        CHECK_FALSE(library.set_level(id, {{"gain_db", 30}}, err));
+        CHECK_FALSE(library.set_level(id, {{"gain_db", "loud"}}, err));
+        CHECK(library.get(id).gain_db == -6.5);
+        CHECK_FALSE(library.set_level("nope", {{"gain_db", 0}}, err));
+        // A video without audio has no level.
+        std::filesystem::path silent = dir / "silent.mkv";
+        REQUIRE(write_clip(silent.string(), true, false));
+        CHECK(library.get(library.ingest_file(silent.string(), "silent", nlohmann::json::object(), fmt).id).level.at("status") == "none");
+        CHECK_FALSE(library.set_level(library.list().back().id, {{"measure", true}}, err));
+    }
+    {
+        Library library(cfg);  // the gain is kept; the measurement is still queued
+        CHECK(library.get(id).gain_db == -6.5);
+        CHECK(library.get(id).level.at("status") == "queued");
+    }
+    // With ffmpeg (the runtime image, not the build stage): measured, and the automatic level set.
+    if (std::system("ffmpeg -hide_banner -version > /dev/null 2>&1") == 0) {
+        const auto tone = (dir / "tone.wav").string();
+        REQUIRE(std::system(("ffmpeg -hide_banner -loglevel error -y -f lavfi -i sine=frequency=1000:duration=3:sample_rate=48000 -af volume=-12dB -ac 2 " + tone).c_str()) == 0);
+        Library library(cfg);
+        const auto item = library.ingest_file(tone, "tone", {{"loudness", true}}, fmt);
+        library.start();
+        for (int i = 0; i < 200 && library.get(item.id).level.value("status", "") != "ready"; ++i) usleep(50000);
+        const auto got = library.get(item.id);
+        library.stop();
+        REQUIRE(got.level.at("status") == "ready");
+        const double lufs = got.level.at("integrated_lufs").get<double>();
+        // A 1 kHz sine at -30 dBFS peak, upmixed to two channels at -3 dB each: -33 LUFS.
+        CHECK(lufs == doctest::Approx(-33.0).epsilon(0.02));
+        CHECK(lufs + got.gain_db == doctest::Approx(-23).epsilon(0.01));
+    }
+    std::filesystem::remove_all(dir);
+}
+
+TEST_CASE("an item converted with loudnorm before the clip level is converted again, and measured") {
+    const auto dir = temp_dir("mtp-level-legacy");
+    std::filesystem::create_directories(dir / "library");
+    nlohmann::json old = nlohmann::json::array({{{"id", "old"},
+                                                 {"name", "old"},
+                                                 {"type", "video"},
+                                                 {"original", {{"filename", "original.mp4"}, {"audio_codec", "aac"}, {"audio_channels", 2}}},
+                                                 {"loudness", true},
+                                                 {"conversions", {{"720p25", {{"status", "ready"}, {"frames", 25}}}}}}});
+    std::ofstream(dir / "library" / "index.json") << old.dump();
+    Config cfg;
+    cfg.library_dir = (dir / "library").string();
+    Library library(cfg);
+    const auto it = library.get("old");
+    CHECK(it.loudness);
+    CHECK(it.conversions.at("720p25").value("status", "") == "");  // made again, without loudnorm
+    CHECK(it.level.at("status") == "queued");
     std::filesystem::remove_all(dir);
 }
