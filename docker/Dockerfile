@@ -37,7 +37,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/* \
     && if ! getent passwd 1000 >/dev/null; then \
          useradd --uid 1000 --no-create-home --shell /usr/sbin/nologin mxl; \
-       fi
+       fi \
+    # A new named volume takes the owner of its mount point: the library and the
+    # configuration must be writable by uid 1000.
+    && mkdir -p /data/library /config && chown 1000:1000 /data/library /config
 
 COPY --from=build /tmp/build/lm-mxl-playout /usr/local/bin/lm-mxl-playout
 COPY --from=build /src/web/dist /usr/local/share/lm-mxl-playout/web
