@@ -5,7 +5,11 @@ import { computed, ref, watch } from "vue";
 import Pill from "./Pill.vue";
 import Segmented from "./Segmented.vue";
 import { ALPHA_MODES, api, fmtBytes, fmtSeconds, FITS, FPS_MODES } from "../api.js";
-import { act, itemsById, live, outputLabel, playItem, refreshLists, selectedOutput, uploadFiles, uploads } from "../store.js";
+import { act, itemsById, live, needsConversion, outputLabel, playItem, refreshLists, selectedOutput, uploadFiles, uploads } from "../store.js";
+const PLAY_MODES = [
+  { value: true, label: "As uploaded" },
+  { value: false, label: "Converted" },
+];
 
 // Search: GET /api/v1/library?q= (name or tag), type filter here.
 const query = ref("");
@@ -64,7 +68,15 @@ function openEdit(item, mode) {
     item,
     name: item.name,
     tags: (item.tags || []).join(", "),
-    options: { fit: item.fit, fps_mode: item.fps_mode, alpha_mode: item.alpha_mode, loudness: item.loudness, crossfade_ms: item.crossfade_ms, map_channels: item.map_channels },
+    options: {
+      fit: item.fit,
+      fps_mode: item.fps_mode,
+      alpha_mode: item.alpha_mode,
+      loudness: item.loudness,
+      crossfade_ms: item.crossfade_ms,
+      map_channels: item.map_channels,
+      direct: !!item.direct,
+    },
   };
   dialog.value.showModal();
 }
@@ -77,7 +89,8 @@ async function saveEdit() {
     ok = await act(() => api.patch(`/api/v1/library/${id}`, { name: e.name.trim(), tags }), `Saved ${e.name.trim()}.`);
   } else {
     const options = { ...e.options, crossfade_ms: Number(e.options.crossfade_ms) || 0, map_channels: Number(e.options.map_channels) || 0 };
-    ok = await act(() => api.post(`/api/v1/library/${id}/reconvert`, options), `Re-converting ${e.item.name}.`);
+    options.direct = options.direct && !needsConversion(options);
+    ok = await act(() => api.post(`/api/v1/library/${id}/reconvert`, options), options.direct ? `${e.item.name} plays as uploaded.` : `Converting ${e.item.name}.`);
   }
   if (ok) {
     dialog.value.close();
@@ -97,7 +110,7 @@ const playTarget = computed(() => selectedOutput.value);
   <div class="panel">
     <h3>Upload</h3>
     <div class="drop" :class="{ over: dragging }" @dragover.prevent="dragging = true" @dragleave="dragging = false" @drop.prevent="dragging = false; onFiles($event.dataTransfer.files)">
-      Drop videos, stills (PNG with alpha for keys) or animated GIFs here, or
+      Drop any video or audio file, stills (PNG with alpha for keys) or animated GIFs here: they play as uploaded, without a conversion. Or
       <input ref="fileInput" type="file" multiple aria-label="Files to upload" @change="onFiles($event.target.files)" />
     </div>
     <div class="row tight" style="margin-top: 0.6rem">
@@ -115,6 +128,10 @@ const playTarget = computed(() => selectedOutput.value);
       <label for="up-ch" style="margin: 0" title="0 keeps the source channels">audio channels</label>
       <input id="up-ch" v-model.number="uploads.options.map_channels" type="number" min="0" max="64" style="width: 5rem" />
       <input v-model="uploads.options.tags" class="grow" placeholder="tags, comma separated" aria-label="Tags" />
+    </div>
+    <div class="row tight">
+      <label class="check" title="Plays from a ProRes mezzanine made once per format: for files too heavy to decode live"><input v-model="uploads.options.convert" type="checkbox" :disabled="needsConversion(uploads.options)" /> Convert on upload</label>
+      <span class="muted small">{{ needsConversion(uploads.options) || uploads.options.convert ? "converted once per output format before it plays" : "plays as uploaded: decoded while it plays" }}</span>
     </div>
     <div v-if="uploads.files.length" class="uploads">
       <div v-for="(u, i) in uploads.files.slice(0, 6)" :key="i" class="upload">
@@ -157,7 +174,7 @@ const playTarget = computed(() => selectedOutput.value);
     </div>
     <table v-if="rows.length">
       <thead>
-        <tr><th></th><th>Name</th><th>Original</th><th>Conversions</th><th>Options</th><th>Used by</th><th></th></tr>
+        <tr><th></th><th>Name</th><th>Original</th><th>Playback</th><th>Options</th><th>Used by</th><th></th></tr>
       </thead>
       <tbody>
         <tr v-for="item in rows" :key="item.id">
@@ -170,14 +187,14 @@ const playTarget = computed(() => selectedOutput.value);
           </td>
           <td class="small">{{ original(item) }}</td>
           <td>
-            <span v-for="(c, f) in item.conversions" :key="f" class="pill" :class="STATUS_KIND[c.status] || 'neutral'" :title="c.error || c.clip_error || ''">{{ f }} {{ c.status }}<template v-if="c.clip === false"> (sprite only)</template></span>
+            <span v-for="(c, f) in item.conversions" :key="f" class="pill" :class="STATUS_KIND[c.status] || 'neutral'" :title="c.error || c.clip_error || ''">{{ f }} {{ c.direct && c.status === "ready" ? "direct" : c.status }}<template v-if="c.clip === false"> (sprite only)</template></span>
           </td>
           <td class="small muted">{{ item.fit }} · {{ item.fps_mode }}<span v-if="item.type === 'still'"> · {{ item.alpha_mode }}</span><span v-if="item.loudness"> · −23 LUFS</span></td>
           <td class="small">{{ usedBy(item).map((o) => o.label).join(", ") || "–" }}</td>
           <td class="actions-cell">
             <button v-if="playTarget" class="btn small" @click="playItem(playTarget.index, item)">Play on {{ outputLabel(playTarget.index) }}</button>
             <button class="btn small secondary" @click="openEdit(item, 'edit')">Edit</button>
-            <button class="btn small secondary" @click="openEdit(item, 'reconvert')">Re-convert</button>
+            <button class="btn small secondary" @click="openEdit(item, 'reconvert')">Playback</button>
             <button class="btn small danger" @click="remove(item)">Delete</button>
           </td>
         </tr>
@@ -189,7 +206,7 @@ const playTarget = computed(() => selectedOutput.value);
 
   <dialog ref="dialog" @close="editing = null">
     <template v-if="editing">
-      <h3>{{ editing.mode === "edit" ? "Edit" : "Re-convert" }} {{ editing.item.name }}</h3>
+      <h3>{{ editing.mode === "edit" ? "Edit" : "Playback of" }} {{ editing.item.name }}</h3>
       <template v-if="editing.mode === 'edit'">
         <label for="ed-name">Name</label>
         <input id="ed-name" v-model="editing.name" />
@@ -197,7 +214,12 @@ const playTarget = computed(() => selectedOutput.value);
         <input id="ed-tags" v-model="editing.tags" />
       </template>
       <template v-else>
-        <p class="note">The original upload is converted again for the player's format with these options.</p>
+        <label>Play</label>
+        <Segmented v-model="editing.options.direct" :options="PLAY_MODES" label="Play" class="small" />
+        <p class="note">
+          <template v-if="editing.options.direct && !needsConversion(editing.options)">The original plays as uploaded, decoded while it plays (a conversion's files are deleted).</template>
+          <template v-else>The original is converted again for each output format with these options<template v-if="editing.options.direct">: loudness, motion interpolation, a crossfade or a channel mapping needs a conversion</template>.</template>
+        </p>
         <label>Aspect</label>
         <Segmented v-model="editing.options.fit" :options="FITS" label="Aspect" class="small" />
         <label>Frame rate</label>
@@ -212,7 +234,7 @@ const playTarget = computed(() => selectedOutput.value);
       </template>
       <div class="actions">
         <button class="btn secondary" @click="dialog.close()">Cancel</button>
-        <button class="btn" :disabled="editing.mode === 'edit' && !editing.name.trim()" @click="saveEdit">{{ editing.mode === "edit" ? "Save" : "Re-convert" }}</button>
+        <button class="btn" :disabled="editing.mode === 'edit' && !editing.name.trim()" @click="saveEdit">{{ editing.mode === "edit" ? "Save" : editing.options.direct && !needsConversion(editing.options) ? "Play direct" : "Convert" }}</button>
       </div>
     </template>
   </dialog>

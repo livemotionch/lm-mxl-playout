@@ -7,7 +7,12 @@
 #include <string>
 #include <vector>
 
+struct AVFrame;
+
 namespace mtp {
+
+// Packs a decoded frame into v210 at its own size (yuv422p10le as it is, other formats through RGB).
+bool frame_to_v210(const AVFrame* frame, std::uint8_t* v210, std::string& error);
 
 struct RgbaBuffer {
     int w = 0;

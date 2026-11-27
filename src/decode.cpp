@@ -68,6 +68,8 @@ void blit_rgba(std::uint8_t* dst, int dw, int dh, const std::uint8_t* src, int s
     }
 }
 
+}  // namespace
+
 // Packs `frame` into `v210` (v210_size(width, height) bytes).
 bool frame_to_v210(const AVFrame* frame, std::uint8_t* v210, std::string& error) {
     const int w = frame->width;
@@ -112,8 +114,6 @@ bool frame_to_v210(const AVFrame* frame, std::vector<std::uint8_t>& v210, std::s
     v210.resize(v210_size(frame->width, frame->height));
     return frame_to_v210(frame, v210.data(), error);
 }
-
-}  // namespace
 
 void rgba_to_fill_key(const std::uint8_t* rgba, int w, int h, bool premultiply, std::uint8_t* fill_v210, std::uint8_t* key_v210,
                       std::uint8_t* alpha10, int key_min, int key_max) {

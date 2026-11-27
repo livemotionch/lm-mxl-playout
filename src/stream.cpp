@@ -1,5 +1,6 @@
 #include "stream.hpp"
 
+#include "direct.hpp"
 #include "util.hpp"
 #include "v210.hpp"
 
@@ -114,7 +115,10 @@ void StreamDecoder::drop(std::size_t count) {
 
 void StreamDecoder::main() {
     MezzanineReader reader;
+    DirectReader direct;  // an original that plays direct (a "direct:" key)
+    bool is_direct = false;
     std::string open_path;
+    std::string open_format;  // a direct reader conforms to one format: another one reopens it
     std::string last_error;
     Frame next;
     while (!stop_) {
@@ -153,6 +157,7 @@ void StreamDecoder::main() {
             std::lock_guard lock(mu_);
             if (!open_path.empty() && !owner_) {
                 reader.close();
+                direct.close();
                 open_path.clear();
             }
             continue;
@@ -167,25 +172,35 @@ void StreamDecoder::main() {
             k = lo + (k - lo) % std::max<std::int64_t>(1, hi - lo);
         }
         std::string err;
-        if (open_path != mezz) {
+        if (open_path != mezz || open_format != fmt.name) {
             open_path.clear();
-            if (!reader.open(mezz, err) || reader.width() != fmt.width || reader.height() != fmt.height) {
+            reader.close();
+            direct.close();
+            DirectSpec spec;
+            is_direct = DirectSpec::parse(mezz, spec);
+            const bool opened = is_direct ? direct.open(spec, fmt, err)
+                                          : reader.open(mezz, err) && reader.width() == fmt.width && reader.height() == fmt.height;
+            if (!opened) {
                 if (err.empty()) err = "mezzanine size differs from the output format";
                 if (err != last_error) log_error("output " + std::to_string(output_) + ": stream: " + err);
                 last_error = err;
                 reader.close();
+                direct.close();
                 std::this_thread::sleep_for(std::chrono::milliseconds(200));
                 continue;
             }
             open_path = mezz;
+            open_format = fmt.name;
         }
         const std::uint64_t a0 = samples_until_grain(static_cast<std::uint64_t>(k), fmt.frame_rate);
         const int count = static_cast<int>(samples_in_grain(static_cast<std::uint64_t>(k), fmt.frame_rate));
         next.frame = k;
-        next.channels = reader.channels();
+        next.channels = is_direct ? direct.channels() : reader.channels();
         next.v210.resize(v210_size(fmt.width, fmt.height));
         next.audio.assign(static_cast<std::size_t>(count) * static_cast<std::size_t>(std::max(0, next.channels)), 0.f);
-        if (!reader.read(k, next.v210.data(), next.channels > 0 ? next.audio.data() : nullptr, a0, count, err)) {
+        float* audio = next.channels > 0 ? next.audio.data() : nullptr;
+        const bool read = is_direct ? direct.read(k, next.v210.data(), audio, a0, count, err) : reader.read(k, next.v210.data(), audio, a0, count, err);
+        if (!read) {
             if (err != last_error) log_error("output " + std::to_string(output_) + ": stream frame " + std::to_string(k) + ": " + err);
             last_error = err;
             std::this_thread::sleep_for(std::chrono::milliseconds(20));

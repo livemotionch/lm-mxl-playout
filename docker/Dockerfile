@@ -15,7 +15,7 @@ ARG MXL_REF
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
         build-essential cmake ninja-build git ca-certificates pkg-config \
-        libfreetype6-dev libavcodec-dev libavformat-dev libavutil-dev \
+        libfreetype6-dev libavcodec-dev libavformat-dev libavfilter-dev libavutil-dev \
         libswscale-dev libswresample-dev nlohmann-json3-dev uuid-dev \
     && rm -rf /var/lib/apt/lists/*
 

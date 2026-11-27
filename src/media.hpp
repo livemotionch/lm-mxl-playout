@@ -30,6 +30,8 @@ struct LibraryItem {
     bool loudness = false;
     int crossfade_ms = 0;
     int map_channels = 0;  // 0 = keep source, pad
+    // Plays the original as it is (no conversion): its `conversions` entries say `direct`.
+    bool direct = false;
     nlohmann::json conversions = nlohmann::json::object();
     bool in_use = false;
 };
@@ -67,6 +69,8 @@ public:
     void purge_uploads();
 
     void ensure_format(const std::string& id, const VideoFormat& format);
+    // Threads a direct video decodes with (PLAYER_DECODE_THREADS).
+    int decode_threads() const { return cfg_.decode_threads; }
 
     std::vector<ConvertJob> jobs() const;
     std::string item_dir(const std::string& id) const;
@@ -123,6 +127,13 @@ private:
 };
 
 const char* item_type_name(ItemType t);
+
+// Options that only a conversion can apply (loudness, motion interpolation, a crossfade at the
+// loop, a channel mapping): with any of them an item is converted, else it plays direct.
+bool needs_conversion(const LibraryItem& it);
+// The `conversions` entry of a direct item at `format` (frames, audio channels, alpha). An
+// animation whose clip needs more than `ram_budget_mb` is a sprite only (clip false, clip_error).
+nlohmann::json direct_entry(const LibraryItem& it, const VideoFormat& format, int ram_budget_mb);
 ItemType parse_item_type(std::string_view s);
 
 }  // namespace mtp

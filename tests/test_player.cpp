@@ -3,6 +3,7 @@
 #include "config.hpp"
 #include "conform.hpp"
 #include "decode.hpp"
+#include "direct.hpp"
 #include "format.hpp"
 #include "ids.hpp"
 #include "media.hpp"
@@ -576,7 +577,7 @@ std::vector<GifRect> pixel_frames(int width, int height, int n) {
 }
 }  // namespace
 
-TEST_CASE("an animated GIF is converted once into a sprite and a clip with alpha, bounded by the RAM budget") {
+TEST_CASE("an animated GIF uploaded with convert is converted once into a sprite and a clip with alpha, bounded by the RAM budget") {
     const auto dir = std::filesystem::temp_directory_path() / "mtp-anim-unit";
     std::filesystem::remove_all(dir);
     std::filesystem::create_directories(dir);
@@ -609,10 +610,11 @@ TEST_CASE("an animated GIF is converted once into a sprite and a clip with alpha
     const VideoFormat fmt = *parse_format("720p25");
     Library library(cfg);
     library.start();
-    const auto a = library.ingest_file(small, "square", nlohmann::json::object(), fmt);
-    const auto b = library.ingest_file(big, "big", nlohmann::json::object(), fmt);
-    const auto c = library.ingest_file(many, "many", nlohmann::json::object(), fmt);
-    const auto d = library.ingest_file(huge, "huge", nlohmann::json::object(), fmt);
+    const nlohmann::json convert{{"convert", true}};
+    const auto a = library.ingest_file(small, "square", convert, fmt);
+    const auto b = library.ingest_file(big, "big", convert, fmt);
+    const auto c = library.ingest_file(many, "many", convert, fmt);
+    const auto d = library.ingest_file(huge, "huge", convert, fmt);
     for (const auto* it : {&a, &b, &c, &d}) library.wait_ready(it->id, fmt.name, 60000);
     library.stop();
 
@@ -661,6 +663,61 @@ TEST_CASE("an animated GIF is converted once into a sprite and a clip with alpha
     for (int i = 0; i < 50; ++i) library.ensure_format(c.id, fmt);
     CHECK(library.jobs().size() == jobs);
     CHECK(library.get(c.id).conversions.at(fmt.name).at("status") == "failed");
+    std::filesystem::remove_all(dir);
+}
+
+TEST_CASE("an animated GIF plays as uploaded: the sprite at the upload, the clip decoded when it loads, the same pictures as converted") {
+    const auto dir = std::filesystem::temp_directory_path() / ("mtp-anim-direct-" + std::to_string(::getpid()));
+    std::filesystem::remove_all(dir);
+    std::filesystem::create_directories(dir);
+    const auto small = (dir / "square.gif").string();
+    std::vector<std::uint8_t> canvas(64 * 36, 0);
+    for (int y = 8; y < 24; ++y)
+        for (int x = 8; x < 24; ++x) canvas[static_cast<std::size_t>(y * 64 + x)] = 1;
+    write_gif(small, 64, 36, {{0, 0, 64, 36, 0, 10, canvas}, {8, 8, 16, 16, 1, 10, {}}, {8, 8, 16, 16, 1, 10, {}}, {8, 8, 16, 16, 1, 10, {}}});
+    const auto many = (dir / "many.gif").string();
+    write_gif(many, 16, 16, pixel_frames(16, 16, 1001));
+    Config cfg;
+    cfg.library_dir = (dir / "library").string();
+    const VideoFormat fmt = *parse_format("720p25");
+    Library library(cfg);  // not started: nothing is converted
+    const auto a = library.ingest_file(small, "square", nlohmann::json::object(), fmt);
+    const auto c = library.ingest_file(many, "many", nlohmann::json::object(), fmt);
+    CHECK(library.jobs().empty());
+    const auto ca = library.get(a.id).conversions.at(fmt.name);
+    CHECK(library.get(a.id).type == ItemType::Sprite);
+    CHECK(ca.at("status") == "ready");
+    CHECK(ca.at("direct") == true);
+    CHECK(ca.at("frames") == 4);
+    CHECK(ca.at("clip") == true);
+    CHECK(ca.at("clip_frames") == 10);
+    const auto adir = std::filesystem::path(library.item_dir(a.id));
+    CHECK(std::filesystem::exists(adir / "sprite.json"));
+    CHECK(std::filesystem::exists(adir / "thumb.jpg"));
+    CHECK_FALSE(std::filesystem::exists(adir / "anim-720p25.v210"));
+    // Decoded at load: the pictures the conversion test checks.
+    std::vector<std::uint8_t> fill, a10;
+    std::vector<double> durations;
+    std::string err;
+    REQUIRE(render_animation(small, "fit", false, fmt, 64ull << 20, fill, a10, durations, err));
+    REQUIRE(durations.size() == 4);
+    CHECK(durations[0] == doctest::Approx(0.1));
+    const std::size_t fsz = v210_size(fmt.width, fmt.height), asz = alpha10_size(fmt.width, fmt.height);
+    CHECK(fill.size() == 4 * fsz);
+    CHECK(a10.size() == 4 * asz);
+    std::vector<std::uint8_t> plane(a10.begin(), a10.begin() + static_cast<std::ptrdiff_t>(asz));
+    CHECK(a10_at(plane, fmt.width, 320, 320) == 1023);
+    CHECK(a10_at(plane, fmt.width, 800, 500) == 0);
+    std::vector<std::uint8_t> first(fill.begin(), fill.begin() + static_cast<std::ptrdiff_t>(fsz));
+    CHECK(luma_at(first, fmt.width, 800, 500) == kYBlack);
+    CHECK(luma_at(first, fmt.width, 320, 320) == rgb_to_yuv709(1, 0, 0).y);
+    // Over the budget: refused with the reason.
+    CHECK_FALSE(render_animation(small, "fit", false, fmt, 1ull << 20, fill, a10, durations, err));
+    CHECK(err.find("PLAYER_RAM_BUDGET_MB") != std::string::npos);
+    // Too many frames: failed at the upload, with the reason.
+    const auto cc = library.get(c.id).conversions.at(fmt.name);
+    CHECK(cc.at("status") == "failed");
+    CHECK(cc.at("error").get<std::string>().find("more than 1000") != std::string::npos);
     std::filesystem::remove_all(dir);
 }
 

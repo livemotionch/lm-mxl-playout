@@ -10,7 +10,7 @@ option(PLAYER_BUILD_TESTS "Build unit tests" ON)
 option(PLAYER_WITH_MXL "Build and link the pinned MXL SDK" ON)
 
 find_package(PkgConfig REQUIRED)
-pkg_check_modules(AV REQUIRED IMPORTED_TARGET libavcodec libavformat libavutil libswscale libswresample)
+pkg_check_modules(AV REQUIRED IMPORTED_TARGET libavcodec libavformat libavfilter libavutil libswscale libswresample)
 pkg_check_modules(FT REQUIRED IMPORTED_TARGET freetype2)
 find_package(nlohmann_json 3 REQUIRED)
 find_package(Threads REQUIRED)
@@ -140,6 +140,7 @@ set(PLAYER_SOURCES
     src/process.cpp
     src/conform.cpp
     src/decode.cpp
+    src/direct.cpp
     src/media.cpp
     src/mxl_io.cpp
     src/http_server.cpp
@@ -168,7 +169,7 @@ target_link_libraries(lm-mxl-playout PRIVATE player_core)
 target_compile_options(lm-mxl-playout PRIVATE -Wall -Wextra)
 
 if(PLAYER_BUILD_TESTS)
-    add_executable(player_tests tests/test_player.cpp tests/test_playout.cpp)
+    add_executable(player_tests tests/test_player.cpp tests/test_playout.cpp tests/test_direct.cpp)
     target_include_directories(player_tests PRIVATE third_party/doctest)
     target_link_libraries(player_tests PRIVATE player_core)
     target_compile_definitions(player_tests PRIVATE MTP_SOURCE_DIR="${CMAKE_SOURCE_DIR}")

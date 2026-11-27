@@ -25,7 +25,7 @@ docker build -f docker/Dockerfile -t lm-mxl-playout .
 
 Every output starts as a **playout** output: black and silence until an operator takes a clip. Burn-ins are off unless switched on.
 
-- **Library.** Upload clips (video, stills, GIF and APNG with alpha), tag them, search by name or tag. Uploads are converted once to the platform format (ProRes mezzanine, or raw frames for animations), so playback is cheap and deterministic.
+- **Library.** Upload clips (any video or audio file FFmpeg reads, stills, GIF and APNG with alpha), tag them, search by name or tag. An upload plays as it is, ready in about a second: a video is decoded while it plays and conformed to the output format (size and aspect, frame rate, interlace, BT.601 to BT.709) by the filters a conversion would use, and a still or an animation is decoded when it is loaded. A file of audio only plays black with its audio. **Convert on upload** (or **Playback → Converted** on an item) makes a ProRes mezzanine per format instead, for files too heavy to decode live; loudness to −23 LUFS, motion-interpolated frame rates, a loop crossfade and a channel mapping need it, and choosing one converts.
 - **Playlists.** Ordered entries, each a library clip with an in and out point, what it does at its end (`next`: the next entry follows, `hold`: its last frame stays, `loop`: it loops until the next take, `stop`: black), the transition into it (`cut`, `mix`, `dip` through black, with a length in frames) and, for a still, its hold time (0: until the next take). A playlist can loop.
 - **Cue and take.** Cue a clip or a playlist (from any entry) on an output. With nothing on air it is **parked** on air at its first frame (cue mode `park`, a clip player for a vision mixer) or waits in the background (`background`, a channel straight to air); with something on air it becomes the **next** clip. **Take** rolls a parked clip, or transitions to the next one with its own transition (or the operator's override). The next entry of a playlist is cued by itself, and loaded ahead: from RAM, or primed in a second decode-ahead stream, so a cut lands on the frame and a mix starts that many frames before the outgoing clip ends.
 - **On air.** Pause and resume, seek, cut to black or fade to black. Countdowns to the end of the clip and of the playlist, the position, what is next and whether it is loaded.
@@ -53,6 +53,7 @@ Precedence is environment, then the JSON file (`--config`, else `PLAYER_CONFIG`,
 | `PLAYER_LIBRARY_DIR` | `/data/library` | Mezzanine library; one player per directory (Kubernetes: `strategy: Recreate`). Items missing from its `index.json` are restored from their `item.json` at start |
 | `PLAYER_IMPORT_DIR` | empty | Watched import directory |
 | `PLAYER_CONVERT_CONCURRENCY` | `1` | ffmpeg jobs at once |
+| `PLAYER_DECODE_THREADS` | `4` | Decoder and filter threads of each clip that plays as uploaded. 1080p50 H.264 and 2160p25 HEVC 10-bit took 1.3 cores together on the build VM |
 | `PLAYER_CONVERT_THREADS` | `2` | CPU threads per conversion. Conversions run at a lower priority (nice 10) than playout; keep threads plus one core per streaming output within the CPU limit |
 | `PLAYER_RAM_CLIP_MAX_S` | `20` | Longest clip kept in RAM |
 | `PLAYER_RAM_BUDGET_MB` | `4096` | One RAM budget for the whole process: every output's clips in RAM (videos up to `PLAYER_RAM_CLIP_MAX_S`, GIF and APNG clips; shared between outputs that play the same clip). Also bounds an animation's conversion |
@@ -106,7 +107,7 @@ Precedence is environment, then the JSON file (`--config`, else `PLAYER_CONFIG`,
 | PUT | `/api/v1/outputs/{id}/source`, `/api/v1/outputs/{id}/burnin` |
 | GET | `/api/v1/outputs/{id}/thumbnail`, `/api/v1/outputs/{id}/probe[?index=]`, `/api/v1/library/{id}/thumbnail` |
 | GET, POST, DELETE | `/api/v1/library`, `/api/v1/presets`, `/api/v1/playlists` (`/api/v1/playlists/{id}` for GET and DELETE) |
-| PATCH, POST | `/api/v1/library/{id}` (name, tags), `/api/v1/library/{id}/reconvert` |
+| PATCH, POST | `/api/v1/library/{id}` (name, tags), `/api/v1/library/{id}/reconvert` (`{"direct": true}` plays the original again and deletes the conversions; else it converts) |
 | PUT, PATCH | `/api/v1/playlists/{id}` (PUT replaces it, PATCH changes the fields it names) |
 | POST, PUT | `/api/v1/uploads`, `/api/v1/uploads/{id}/chunks/{n}`, `/api/v1/uploads/{id}/complete` |
 | GET | `/api/v1/jobs` |

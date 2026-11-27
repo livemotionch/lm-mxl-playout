@@ -177,6 +177,7 @@ void validate(Config& c) {
     if (c.ram_clip_max_s < 0 || c.ram_clip_max_s > 600) throw ConfigError("PLAYER_RAM_CLIP_MAX_S out of range");
     if (c.ram_budget_mb < 64) throw ConfigError("PLAYER_RAM_BUDGET_MB too small");
     if (c.preroll_frames < 1 || c.preroll_frames > 250) throw ConfigError("PLAYER_PREROLL_FRAMES out of range");
+    if (c.decode_threads < 1 || c.decode_threads > 64) throw ConfigError("PLAYER_DECODE_THREADS must be 1..64");
     if (c.web_port < 1 || c.web_port > 65535) throw ConfigError("WEB_PORT out of range");
     if (c.nmos_port < 1 || c.nmos_port > 65535) throw ConfigError("NMOS_PORT out of range");
     if (c.nmos_registry_port < 1 || c.nmos_registry_port > 65535) throw ConfigError("NMOS_REGISTRY_PORT out of range");
@@ -426,6 +427,7 @@ Config load_config(const std::string& file_path, const char* const* envp) {
     c.ram_clip_max_s = pick_dbl("PLAYER_RAM_CLIP_MAX_S", "ram_clip_max_s", 20);
     c.ram_budget_mb = pick_int("PLAYER_RAM_BUDGET_MB", "ram_budget_mb", 4096);
     c.preroll_frames = pick_int("PLAYER_PREROLL_FRAMES", "preroll_frames", 25);
+    c.decode_threads = pick_int("PLAYER_DECODE_THREADS", "decode_threads", 4);
     {
         const auto cue = pick_str("PLAYER_CUE_MODE", "cue_mode", "park");
         if (cue != "park" && cue != "background") throw ConfigError("PLAYER_CUE_MODE must be park or background");
@@ -533,6 +535,7 @@ Config load_config(const std::string& file_path, const char* const* envp) {
         {"PLAYER_RAM_CLIP_MAX_S", num(c.ram_clip_max_s)},
         {"PLAYER_RAM_BUDGET_MB", std::to_string(c.ram_budget_mb)},
         {"PLAYER_PREROLL_FRAMES", std::to_string(c.preroll_frames)},
+        {"PLAYER_DECODE_THREADS", std::to_string(c.decode_threads)},
         {"PLAYER_CUE_MODE", cue_mode_name(c.cue_mode)},
         {"PLAYER_FONT_DIR", c.font_dir},
         {"PLAYER_WEB_ROOT", c.web_root},

@@ -3,6 +3,7 @@
 #include "conform.hpp"
 #include "motion.hpp"
 #include "decode.hpp"
+#include "direct.hpp"
 #include "process.hpp"
 #include "util.hpp"
 #include "uuid_util.hpp"
@@ -60,6 +61,7 @@ LibraryItem item_from_json(const json& el) {
     it.crossfade_ms = el.value("crossfade_ms", 0);
     it.map_channels = el.value("map_channels", 0);
     it.conversions = el.value("conversions", json::object());
+    it.direct = el.value("direct", false);
     return it;
 }
 
@@ -152,6 +154,122 @@ ItemType parse_item_type(std::string_view s) {
     if (s == "sprite") return ItemType::Sprite;
     return ItemType::Video;
 }
+
+bool needs_conversion(const LibraryItem& it) {
+    return it.loudness || it.fps_mode == "motion" || it.crossfade_ms > 0 || it.map_channels > 0;
+}
+
+json direct_entry(const LibraryItem& it, const VideoFormat& format, int ram_budget_mb) {
+    const auto& o = it.original;
+    if (it.type == ItemType::Still) return json{{"status", "ready"}, {"direct", true}, {"frames", 1}, {"has_alpha", true}, {"audio_samples", 0}};
+    if (it.type == ItemType::Sprite) {
+        const auto durations = o.value("anim_durations", std::vector<double>{});
+        if (durations.empty()) return json{{"status", "failed"}, {"direct", true}, {"error", o.value("anim_error", "the animation could not be decoded")}};
+        double total = 0;
+        for (double d : durations) total += d;
+        json e{{"status", "ready"}, {"direct", true}, {"frames", durations.size()}, {"sprite", true}, {"clip", true},
+               {"has_alpha", true}, {"seconds", total}, {"clip_frames", animation_loop_frames(total, format.frame_rate)}};
+        // At play the clip takes the fill and the alpha plane (v210a) or the fill and the key
+        // (fill_key, the larger): that must fit the budget, else it is a burn-in sprite only.
+        const std::uint64_t fill = v210_size(format.width, format.height), a10 = alpha10_size(format.width, format.height);
+        const std::uint64_t clip_bytes = durations.size() * std::max(fill + a10, 2 * fill);
+        if (clip_bytes > (static_cast<std::uint64_t>(ram_budget_mb) << 20)) {
+            e["clip"] = false;
+            e["clip_error"] = "clip needs " + std::to_string(clip_bytes >> 20) + " MB at " + format.name + " (" + std::to_string(durations.size()) +
+                              " frames), more than PLAYER_RAM_BUDGET_MB (" + std::to_string(ram_budget_mb) + ")";
+            e.erase("clip_frames");
+        }
+        return e;
+    }
+    if (o.value("codec", "").empty() && o.value("audio_codec", "").empty())
+        return json{{"status", "failed"}, {"direct", true}, {"error", "no video or audio the player can read"}};
+    const double duration = o.value("video_duration", 0.0) > 0 ? o.value("video_duration", 0.0) : o.value("duration", 0.0);
+    const auto frames = direct_frames(duration, format);
+    return json{{"status", "ready"},
+                {"direct", true},
+                {"frames", frames},
+                {"audio_channels", o.value("audio_channels", 0)},
+                {"audio_samples", samples_until_grain(static_cast<std::uint64_t>(frames), format.frame_rate)},
+                {"has_alpha", false}};
+}
+
+namespace {
+
+// The moving-box sprite of an animation (frames of at most `max_px`, sprite/ and sprite.json) and
+// its thumbnail, decoded once at the upload. Returns the frame durations; empty with `error`.
+std::vector<double> write_sprite(const fs::path& original, const fs::path& dir, int max_px, std::string& error) {
+    std::error_code ec;
+    const auto part = dir / "sprite.part";
+    fs::remove_all(part, ec);
+    fs::create_directories(part);
+    json frames = json::array();
+    std::vector<double> durations;
+    RgbaFitter fitter;
+    RgbaBuffer sprite;
+    int sw = 0, sh = 0;
+    bool write_failed = false;
+    VisualInfo info;
+    if (!probe_visual(original.string(), info, error)) return {};
+    if (info.frames > kMaxAnimationFrames) {
+        error = "animation has " + std::to_string(info.frames) + " frames, more than " + std::to_string(kMaxAnimationFrames);
+        return {};
+    }
+    const bool decoded = decode_visual_frames(original.string(), [&](const RgbaBuffer& f, double d) {
+        fitter.fit(f, ScaleMode::SpriteMax, max_px, max_px, sprite);
+        char name[32];
+        std::snprintf(name, sizeof(name), "frame-%04d.rgba", static_cast<int>(durations.size()));
+        std::ofstream out(part / name, std::ios::binary);
+        out.write(reinterpret_cast<const char*>(sprite.px.data()), static_cast<std::streamsize>(sprite.px.size()));
+        if (!out) write_failed = true;
+        frames.push_back({{"file", name}, {"duration", d}, {"w", sprite.w}, {"h", sprite.h}});
+        if (durations.empty()) {
+            sw = sprite.w;
+            sh = sprite.h;
+            std::vector<std::uint8_t> rgb(static_cast<std::size_t>(sw) * sh * 3);
+            for (int p = 0; p < sw * sh; ++p)
+                for (int c = 0; c < 3; ++c) rgb[static_cast<std::size_t>(p) * 3 + c] = sprite.px[static_cast<std::size_t>(p) * 4 + c];
+            write_jpeg((dir / "thumb.jpg").string(), rgb.data(), sw, sh, 80);
+        }
+        durations.push_back(d);
+        return true;
+    }, error);
+    double total = 0;
+    for (double d : durations) total += d;
+    if (decoded && !write_failed) {
+        std::ofstream meta(part / "sprite.json");
+        meta << json{{"frames", frames}, {"total", total}, {"w", sw}, {"h", sh}}.dump(2);
+        meta.close();
+        if (!meta) write_failed = true;
+    }
+    if (!decoded || write_failed || durations.empty()) {
+        fs::remove_all(part, ec);
+        if (error.empty()) error = write_failed ? "writing the sprite failed (disk full?)" : "the animation has no frame";
+        return {};
+    }
+    // sprite.json last: the writer reads a sprite only once sprite.json is there.
+    fs::remove_all(dir / "sprite", ec);
+    fs::rename(part / "sprite.json", dir / "sprite.json.part", ec);
+    fs::rename(part, dir / "sprite", ec);
+    fs::rename(dir / "sprite.json.part", dir / "sprite.json", ec);
+    return durations;
+}
+
+// Removes the files of every conversion (an item that plays direct again); the original, the
+// sprite and the thumbnail stay.
+void remove_conversions(const fs::path& dir) {
+    std::error_code ec;
+    for (const auto& ent : fs::directory_iterator(dir, ec)) {
+        const auto name = ent.path().filename().string();
+        for (const char* prefix : {"mezz-", "frame-", "key-", "alpha-", "anim-"}) {
+            if (name.rfind(prefix, 0) == 0) {
+                fs::remove(ent.path(), ec);
+                break;
+            }
+        }
+    }
+}
+
+}  // namespace
 
 Library::Library(Config cfg) : cfg_(std::move(cfg)) {
     ram_->limit = static_cast<std::uint64_t>(std::max(0, cfg_.ram_budget_mb)) << 20;
@@ -268,6 +386,7 @@ nlohmann::json Library::to_json(const LibraryItem& it) const {
                 {"crossfade_ms", it.crossfade_ms},
                 {"map_channels", it.map_channels},
                 {"conversions", it.conversions},
+                {"direct", it.direct},
                 {"in_use", it.in_use}};
 }
 
@@ -324,13 +443,17 @@ void Library::enqueue(const std::string& id, const VideoFormat& format) {
 
 LibraryItem Library::ingest_file(const std::string& path, const std::string& name, const nlohmann::json& options, const VideoFormat& format) {
     const auto probed = probe_json(path);
-    std::string vcodec, acodec, rate = "0/1", scan = "progressive";
+    std::string vcodec, acodec, rate = "0/1", scan = "progressive", color_space;
     int w = 0, h = 0, ach = 0;
-    double duration = 0;
+    double duration = 0, video_duration = 0;
     int vframes = 0;
     if (probed.contains("format")) duration = std::atof(probed["format"].value("duration", "0").c_str());
     for (const auto& st : probed.value("streams", json::array())) {
-        if (st.value("codec_type", "") == "video" && w == 0) {
+        // The cover art of an audio file is not its video.
+        const bool cover = st.contains("disposition") && st["disposition"].value("attached_pic", 0) == 1;
+        if (st.value("codec_type", "") == "video" && w == 0 && !cover) {
+            color_space = st.value("color_space", "");
+            video_duration = std::atof(st.value("duration", "0").c_str());
             vcodec = st.value("codec_name", "");
             w = st.value("width", 0);
             h = st.value("height", 0);
@@ -344,6 +467,7 @@ LibraryItem Library::ingest_file(const std::string& path, const std::string& nam
         }
     }
     if (vcodec.empty() && !probed.contains("streams")) vcodec = probe_video_codec(path);  // without ffprobe
+    // A file of audio only (or audio with cover art) plays as a video: black, with its audio.
     const bool image_codec = vcodec == "png" || vcodec == "mjpeg" || vcodec == "tiff" || vcodec == "webp" || vcodec == "gif" ||
                              vcodec == "apng" || vcodec == "bmp";
     ItemType type = ItemType::Video;
@@ -360,7 +484,7 @@ LibraryItem Library::ingest_file(const std::string& path, const std::string& nam
         for (const auto& existing : items_) {
             if (existing.id != it.id) continue;
             const auto st = existing.conversions.value(format.name, json::object()).value("status", "");
-            if (st != "ready") enqueue(existing.id, format);
+            if (st != "ready" && !existing.direct) enqueue(existing.id, format);
             return existing;
         }
     }
@@ -372,6 +496,8 @@ LibraryItem Library::ingest_file(const std::string& path, const std::string& nam
     it.loudness = options.value("loudness", false);
     it.crossfade_ms = options.value("crossfade_ms", 0);
     it.map_channels = options.value("map_channels", 0);
+    // Played as uploaded, unless the upload asks for a conversion (or for what only one applies).
+    it.direct = !options.value("convert", false) && !needs_conversion(it);
     if (options.contains("tags")) {
         for (const auto& t : options.at("tags")) it.tags.push_back(t.get<std::string>());
     }
@@ -384,13 +510,41 @@ LibraryItem Library::ingest_file(const std::string& path, const std::string& nam
                        {"scan", scan},
                        {"duration", duration},
                        {"audio_channels", ach},
-                       {"frames", vframes}};
-    fs::create_directories(item_dir(it.id));
-    fs::copy_file(path, fs::path(item_dir(it.id)) / it.original["filename"].get<std::string>(), fs::copy_options::overwrite_existing);
+                       {"frames", vframes},
+                       {"color_space", color_space},
+                       {"video_duration", video_duration}};
+    const auto dir = fs::path(item_dir(it.id));
+    fs::create_directories(dir);
+    const auto original = dir / it.original["filename"].get<std::string>();
+    fs::copy_file(path, original, fs::copy_options::overwrite_existing);
+    if (it.direct) {
+        // No conversion: what the outputs need to play it is read now, and the thumbnail made.
+        std::string err;
+        if (it.type == ItemType::Sprite) {
+            const auto durations = write_sprite(original, dir, cfg_.sprite_max_px, err);
+            if (durations.empty()) it.original["anim_error"] = err;
+            else it.original["anim_durations"] = durations;
+        } else if (it.type == ItemType::Still) {
+            std::vector<std::uint8_t> fill, key, a10;
+            if (render_still(original.string(), it.fit, it.alpha_mode == "premultiplied", format, fill, key, a10, err)) {
+                v210_to_jpeg((dir / "thumb.jpg").string(), fill.data(), format.width, format.height, 320);
+            }
+        } else if (!vcodec.empty()) {
+            run_process({"ffmpeg", "-hide_banner", "-y", "-ss", std::to_string(std::min(1.0, duration / 2)), "-i", original.string(), "-vf",
+                         "scale=320:-2", "-frames:v", "1", (dir / "thumb.jpg").string()});
+        }
+        it.conversions[format.name] = direct_entry(it, format, cfg_.ram_budget_mb);
+        log_info("library: " + it.name + " plays direct (" + (vcodec.empty() ? acodec : vcodec) + "): " + it.conversions[format.name].value("status", "") + " " + it.conversions[format.name].value("error", ""));
+    }
     {
         std::lock_guard lock(mu_);
         items_.push_back(it);
-        enqueue(it.id, format);
+        if (it.direct) {
+            save_item(it);
+            save_index();
+        } else {
+            enqueue(it.id, format);
+        }
         bytes_ = dir_bytes(cfg_.library_dir);
     }
     if (on_change) on_change();
@@ -407,6 +561,34 @@ bool Library::reconvert(const std::string& id, const nlohmann::json& options, co
         if (options.contains("loudness")) it.loudness = options.at("loudness").get<bool>();
         if (options.contains("crossfade_ms")) it.crossfade_ms = options.at("crossfade_ms").get<int>();
         if (options.contains("map_channels")) it.map_channels = options.at("map_channels").get<int>();
+        // {"direct": true}: play the original again (when no option needs a conversion).
+        if (options.value("direct", false)) {
+            if (needs_conversion(it)) {
+                error = "loudness, motion interpolation, a crossfade or a channel mapping needs a conversion";
+                return false;
+            }
+            for (const auto& j : jobs_)
+                if (j.item_id == id && (j.state == "queued" || j.state == "running")) {
+                    error = "a conversion of this item is running";
+                    return false;
+                }
+            const auto dir = fs::path(item_dir(id));
+            if (it.type == ItemType::Sprite && !it.original.contains("anim_durations")) {
+                std::string err;
+                const auto durations = write_sprite(dir / it.original.value("filename", "original.bin"), dir, cfg_.sprite_max_px, err);
+                if (durations.empty()) it.original["anim_error"] = err;
+                else it.original["anim_durations"] = durations;
+            }
+            it.direct = true;
+            remove_conversions(dir);
+            it.conversions = json::object();
+            it.conversions[format.name] = direct_entry(it, format, cfg_.ram_budget_mb);
+            save_item(it);
+            save_index();
+            bytes_ = dir_bytes(cfg_.library_dir);
+            return true;
+        }
+        it.direct = false;
         enqueue(id, format);
         return true;
     }
@@ -462,8 +644,17 @@ void Library::mark_used(const std::string& id, bool used) {
 
 void Library::ensure_format(const std::string& id, const VideoFormat& format) {
     std::lock_guard lock(mu_);
-    for (const auto& it : items_) {
+    for (auto& it : items_) {
         if (it.id != id) continue;
+        if (it.direct) {
+            // Another output format: only its frame count is new.
+            if (!it.conversions.contains(format.name)) {
+                it.conversions[format.name] = direct_entry(it, format, cfg_.ram_budget_mb);
+                save_item(it);
+                save_index();
+            }
+            return;
+        }
         const auto conv = it.conversions.value(format.name, json::object());
         const auto st = conv.value("status", "");
         // A sprite converted before 1.3.0 has no clip yet: it is converted once more.
@@ -740,34 +931,9 @@ bool Library::convert_one(LibraryItem& item, const VideoFormat& format, ConvertJ
             return true;
         }
 
-        // Video mezzanine.
-        const bool dst_i = format.interlaced();
-        const int prog_fps_num = dst_i ? static_cast<int>(format.frame_rate.num * 2) : static_cast<int>(format.frame_rate.num);
-        const int prog_fps_den = static_cast<int>(format.frame_rate.den);
-        std::string vf;
-        const std::string scan = item.original.value("scan", "progressive");
-        const bool src_i = scan.find("interlace") != std::string::npos;
-        if (src_i) vf += "bwdif=mode=send_frame,";
-        const std::string cs = item.original.value("color_space", "");
-        if (cs == "smpte170m" || cs == "bt470bg" || cs == "smpte240m") vf += "colorspace=all=bt709:iall=bt601,";
-        if (item.fit == "fill") {
-            vf += "scale=" + std::to_string(format.width) + ":" + std::to_string(format.height) +
-                  ":force_original_aspect_ratio=increase,crop=" + std::to_string(format.width) + ":" + std::to_string(format.height) + ",";
-        } else if (item.fit == "center" || item.fit == "1:1") {
-            vf += "pad=" + std::to_string(format.width) + ":" + std::to_string(format.height) + ":(ow-iw)/2:(oh-ih)/2:black,crop=" +
-                  std::to_string(format.width) + ":" + std::to_string(format.height) + ",";
-        } else {
-            vf += "scale=" + std::to_string(format.width) + ":" + std::to_string(format.height) +
-                  ":force_original_aspect_ratio=decrease,pad=" + std::to_string(format.width) + ":" + std::to_string(format.height) +
-                  ":(ow-iw)/2:(oh-ih)/2:black,";
-        }
-        const std::string fps = std::to_string(prog_fps_num) + "/" + std::to_string(prog_fps_den);
-        if (item.fps_mode == "motion") vf += "minterpolate=fps=" + fps + ":mi_mode=mci,";
-        else vf += "fps=" + fps + ",";
-        // Two progressive frames at the field rate make one frame; the earlier one goes into the
-        // first field's lines (top for tff, bottom for bff).
-        if (dst_i) vf += format.bottom_field_first() ? "tinterlace=mode=interleave_bottom," : "tinterlace=mode=interleave_top,";
-        vf += "format=yuv422p10le";
+        // Video mezzanine: the filters a direct play uses (direct.cpp), and motion interpolation.
+        const std::string vf = conform_filter(item.fit, item.fps_mode, item.original.value("scan", "progressive"),
+                                              item.original.value("color_space", ""), format);
         const auto video_only = dir / "video-tmp.mov";
         const auto mezz = dir / ("mezz-" + format.name + ".mov");
         // PLAYER_CONVERT_THREADS for the decoder, the filters and the encoder: an ffmpeg with a

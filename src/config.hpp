@@ -107,6 +107,7 @@ struct Config {
     std::string import_dir;
     int convert_concurrency = 1;
     int convert_threads = 2;
+    int decode_threads = 4;
     double ram_clip_max_s = 20;
     int ram_budget_mb = 4096;
     int preroll_frames = 25;

@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
 """CPU integration of the playout: park and take, a playlist with a cut and with a mix, from RAM and
-streamed from the mezzanine. Reads the written grains back (centre pixel luma) and checks that the
-clips follow each other frame-accurately: no black and no repeated frame at a cut, a monotonic mix.
+streamed. Reads the written grains back (centre pixel luma) and checks that the clips follow each
+other frame-accurately: no black and no repeated frame at a cut, a monotonic mix.
 
-PLAYOUT_STREAM=1 plays every clip from its mezzanine (PLAYER_RAM_CLIP_MAX_S=0)."""
+By default the uploads play as uploaded (direct: decoded while they play), and a clip of another
+size and frame rate with long GOPs and B-frames (640x360, 30 fps) is cut frame-accurately too.
+PLAYOUT_CONVERT=1 converts the uploads to ProRes mezzanines (played from RAM), and with
+PLAYOUT_STREAM=1 every mezzanine streams (PLAYER_RAM_CLIP_MAX_S=0)."""
 
 import ctypes
 import json
@@ -20,6 +23,7 @@ BIN = ROOT / "build" / "lm-mxl-playout"
 BASE = os.environ.get("PLAYER_BASE", "http://127.0.0.1:18140")
 PORT = int(BASE.rsplit(":", 1)[-1])
 STREAM = os.environ.get("PLAYOUT_STREAM") == "1"
+CONVERT = os.environ.get("PLAYOUT_CONVERT") == "1" or STREAM
 FPS = 25
 
 
@@ -47,17 +51,17 @@ def tai_index():
     return (t.sec * 10**9 + t.nsec) * FPS // 10**9
 
 
-def make_clip(path, colour, seconds):
+def make_clip(path, colour, seconds, size="320x180", rate=FPS, gop=["-g", "1"]):
     subprocess.check_call(
         ["ffmpeg", "-hide_banner", "-y",
-         "-f", "lavfi", "-i", f"color=c={colour}:s=320x180:r={FPS}:d={seconds}",
-         "-f", "lavfi", "-i", f"sine=frequency=1000:duration={seconds}:sample_rate=48000",
-         "-c:v", "libx264", "-pix_fmt", "yuv420p", "-g", "1", "-c:a", "aac", "-ac", "2", str(path)],
+         "-f", "lavfi", "-i", f"color=c={colour}:s={size}:r={rate}:d={seconds}",
+         "-f", "lavfi", "-i", f"sine=frequency=1000:duration={seconds}:sample_rate=44100",
+         "-c:v", "libx264", "-pix_fmt", "yuv420p", *gop, "-c:a", "aac", "-ac", "2", str(path)],
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
 def upload(path):
-    meta = http("POST", "/api/v1/uploads", {"name": path.name, "size": path.stat().st_size, "options": {"fit": "fill"}})
+    meta = http("POST", "/api/v1/uploads", {"name": path.name, "size": path.stat().st_size, "options": {"fit": "fill", "convert": CONVERT}})
     http("PUT", f"/api/v1/uploads/{meta['id']}/chunks/0", raw=path.read_bytes())
     item = http("POST", f"/api/v1/uploads/{meta['id']}/complete", {})
     deadline = time.time() + 120
@@ -65,6 +69,7 @@ def upload(path):
         item = http("GET", f"/api/v1/library/{item['id']}")
         conv = item["conversions"].get("720p25", {})
         if conv.get("status") == "ready":
+            assert bool(conv.get("direct")) == (not CONVERT), conv
             return item
         if conv.get("status") == "failed":
             raise SystemExit(f"conversion failed: {conv}")
@@ -126,12 +131,14 @@ def wait_state(want, timeout=10):
 
 
 def main():
-    work = Path("/tmp/lm-playout-int" + ("-stream" if STREAM else ""))
+    work = Path("/tmp/lm-playout-int" + ("-stream" if STREAM else "-convert" if CONVERT else ""))
     subprocess.call(["rm", "-rf", str(work)])
     work.mkdir(parents=True)
     a, b = work / "light.mp4", work / "dark.mp4"
     make_clip(a, "0xB4B4B4", 1)
     make_clip(b, "0x404040", 1)
+    m = work / "mid30.mp4"  # another size and rate, long GOPs with B-frames
+    make_clip(m, "0x808080", 1, size="640x360", rate=30, gop=["-g", "15", "-bf", "2"])
 
     env = os.environ.copy()
     env.update({
@@ -262,6 +269,32 @@ def main():
         assert min(ys[i] for i in between) <= levels["black"] + 40, [ys[i] for i in between]
         assert runs(core)[-1] == ("dark", FPS - 5), r  # dark rolls from the dip's middle
 
+        # Another size and frame rate, long GOPs with B-frames: 30 fps for 1 s is 25 frames here,
+        # cut frame-accurately after the dark clip (direct: decoded and conformed while it plays).
+        if not CONVERT:
+            mid = upload(m)
+            assert mid["conversions"]["720p25"]["frames"] == FPS, mid["conversions"]
+            playout({"action": "cue", "item_id": mid["id"], "end": "hold", "take": True})
+            wait_state("ended", timeout=4)
+            levels["mid"] = http("GET", "/api/v1/outputs/0/probe")["y"]
+            playout({"action": "stop"})
+            wait_state("idle")
+            assert levels["dark"] + 100 < levels["mid"] < levels["light"] - 100, levels
+            other = http("POST", "/api/v1/playlists", {"name": "other", "entries": [
+                {"item_id": dark["id"], "end": "next"},
+                {"item_id": mid["id"], "end": "next"},
+                {"item_id": light["id"], "end": "stop"}]})
+            playout({"action": "cue", "playlist_id": other["id"]})
+            time.sleep(0.6)
+            assert http("GET", "/api/v1/outputs/0")["playout"]["next"]["ready"]
+            start = tai_index()
+            playout({"action": "take"})
+            time.sleep(3.6)
+            seq = [classify(y, levels) if y is not None else "none" for y in lumas(start - 2, start + 90)]
+            r = runs(seq)
+            print("other format", r, "missed", http("GET", "/api/v1/outputs/0")["stream_missed"])
+            assert runs(from_first(seq, "dark")) == [("dark", FPS), ("mid", FPS), ("light", FPS)], r
+
         # Stop with a fade, then the status says idle; the API refuses an unknown action.
         playout({"action": "cue", "item_id": light["id"], "end": "loop", "take": True})
         time.sleep(0.5)
@@ -272,7 +305,7 @@ def main():
         st = http("GET", "/api/v1/outputs/0")
         print("underruns", st["underruns"], "stream_missed", st["stream_missed"])
         assert st["stream_missed"] == 0, st["stream_missed"]
-        print("playout integration OK" + (" (streamed)" if STREAM else ""))
+        print("playout integration OK" + (" (converted, streamed)" if STREAM else " (converted)" if CONVERT else " (direct)"))
     finally:
         proc.terminate()
         try:

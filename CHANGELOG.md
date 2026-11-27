@@ -13,8 +13,17 @@ The Livemotion fork of mxl-test-player 1.3.3 as a media playout. See README "Pla
 - **UI.** A Playout tab first: picture, meters and the on-air panel (Take, Pause/Resume, Black, Fade, the take's transition; keys Space, P, B, F), with a shotbox (click cues, double click plays; what a single clip does at its end) and a rundown. The Playlists tab edits in/out, end actions, transitions and hold times. Library "Play on" cues and takes.
 - **Widgets.** `transport` is the on-air panel on a playout output; new `shotbox` and `rundown` (`playlist` optional).
 
+### Uploads play as uploaded
+
+- **No conversion.** An upload is ready in about a second and plays from the original: a video (any container and codec FFmpeg reads, or audio only, which plays black) is decoded while it plays and conformed to the output format by the filters the conversion uses (`src/direct.cpp`, libavfilter: deinterlace, BT.601 to BT.709, fit, frame rate, interlace), with its audio resampled to 48 kHz. A seek decodes from the key frame before it. After the end of the file the last frame is held. A still is decoded when it is loaded; an animation too (into the shared RAM clip), its sprite and thumbnail are made at the upload. Each format has a `direct` entry in `conversions`, with no job.
+- **Converting is a choice.** `options.convert` at the upload, `POST /api/v1/library/{id}/reconvert` (`{"direct": true}` back to the original, deleting the conversions), Library "Convert on upload" and "Playback". Loudness, motion interpolation, a loop crossfade and a channel mapping still need a conversion and choose one.
+- `PLAYER_DECODE_THREADS` (4): decoder and filter threads per clip. On the build VM a playlist looping 1080p50 H.264 and 2160p25 HEVC 10-bit with mixes ran 0 underruns and 0 late frames on 1.3 cores, and a cue into a long GOP was ready in 0.2 s.
+- An upload FFmpeg cannot read fails at once with the reason; before, its conversion failed.
+- The image needs `libavfilter` (in the FFmpeg runtime already; `libavfilter-dev` to build). `/data/library` and `/config` belong to uid 1000, so new volumes are writable.
+
 ### Changed defaults (breaking)
 
+- Uploads play as uploaded (above); the ProRes conversion only when asked for.
 - Outputs start black and silent (playout), not with colour bars and tone; burn-ins (label, timecode, frame counter, item, flow id) are off by default.
 - The binary, image and UI are `lm-mxl-playout` (`ghcr.io/livemotionch/lm-mxl-playout`); `NMOS_LABEL` defaults to `MXL Playout`. Metric names keep the `mxl_test_player_` prefix, and the NMOS ids the same seed derivation, so dashboards and ids carry over.
 - The test player's sources stay (Test source tab, `PUT /api/v1/outputs/{id}/source` with `pattern`, `video`, `still`, `playlist`); `{"type": "playout"}` brings an output back. The playlist source reads the new entries (`end: loop` is `loops: 0`).
@@ -22,7 +31,8 @@ The Livemotion fork of mxl-test-player 1.3.3 as a media playout. See README "Pla
 ### Tests
 
 - Unit tests of the playout state machine (park, background, end actions, cut, mix and dip timing, pause and seek, stills, looping playlists, waiting for the next clip, countdowns) and of the blends.
-- `tests/integration/playout.py` reads the grains back: a playlist's cut is exactly 25 + 25 frames with no black, a 10-frame mix and a dip land on the frame, from RAM and with `PLAYOUT_STREAM=1` streamed.
+- `tests/integration/playout.py` reads the grains back: a playlist's cut is exactly 25 + 25 frames with no black, a 10-frame mix and a dip land on the frame, with uploads that play as uploaded (and a 640x360 30 fps long-GOP clip with B-frames cut exactly at 25 fps), converted (`PLAYOUT_CONVERT=1`) and converted and streamed (`PLAYOUT_STREAM=1`).
+- Unit tests of direct play (`tests/test_direct.cpp`): frame-rate conforming, a seek gives the frame a sequential read gave, the last frame held, 44.1 kHz audio at 48 kHz, audio only, the library's direct entries and the switch to a conversion; a direct animation gives the converted pictures.
 
 ## 1.3.3 (2026-11-18)
 

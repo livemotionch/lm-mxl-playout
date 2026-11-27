@@ -3,6 +3,7 @@
 #include "anc.hpp"
 #include "audio.hpp"
 #include "decode.hpp"
+#include "direct.hpp"
 #include "overlay.hpp"
 #include "pattern.hpp"
 #include "motion.hpp"
@@ -281,6 +282,21 @@ Output::Media Output::load_media(const SourceDesc& src, const VideoFormat& fmt) 
             library_.ensure_format(item.id, fmt);
             return media;
         }
+        if (conv.value("direct", false)) {
+            // Decoded from the original now (an image takes milliseconds).
+            std::string err;
+            if (!render_still((dir / item.original.value("filename", "original.bin")).string(), item.fit, item.alpha_mode == "premultiplied", fmt,
+                              media.still_fill, media.still_key, media.still_a10, err)) {
+                media.still_fill.clear();
+                media.error = err;
+                return media;
+            }
+            media.still = true;
+            media.premultiplied = item.alpha_mode == "premultiplied";
+            media.ready = true;
+            media.frames = 1;
+            return media;
+        }
         std::ifstream in(dir / ("frame-" + fmt.name + ".v210"), std::ios::binary);
         media.still_fill.assign(std::istreambuf_iterator<char>(in), {});
         std::ifstream kin(dir / ("key-" + fmt.name + ".v210"), std::ios::binary);
@@ -307,6 +323,19 @@ Output::Media Output::load_media(const SourceDesc& src, const VideoFormat& fmt) 
         media.channels = cfg_.audio_channels;
     }
     if (item.original.contains("timecode")) media.tc_start = item.original.value("timecode", "00:00:00:00");
+    if (conv.value("direct", false)) {
+        // Streams from the original, decoded and conformed while it plays.
+        DirectSpec spec;
+        spec.path = (dir / item.original.value("filename", "original.bin")).string();
+        spec.fit = item.fit;
+        spec.scan = item.original.value("scan", "progressive");
+        spec.color_space = item.original.value("color_space", "");
+        spec.threads = library_.decode_threads();
+        media.ready = fs::exists(spec.path);
+        media.ram = false;
+        media.mezz = spec.key();
+        return media;
+    }
     const double seconds = fmt.frame_rate.to_double() > 0 ? static_cast<double>(media.frames) / fmt.frame_rate.to_double() : 0;
     const auto mezz = dir / conv.value("mezz", "mezz-" + fmt.name + ".mov");
     const std::uint64_t bytes = static_cast<std::uint64_t>(media.frames) * v210_size(fmt.width, fmt.height);
@@ -359,15 +388,20 @@ Output::Media Output::load_animation(const LibraryItem& item, const fs::path& di
         key_min = cfg_.key_min;
         key_max = cfg_.key_max;
     }
+    const bool direct = conv.value("direct", false);
     std::vector<double> durations;
-    try {
-        std::ifstream in(dir / "sprite.json");
-        nlohmann::json meta;
-        in >> meta;
-        for (const auto& fr : meta.value("frames", nlohmann::json::array())) durations.push_back(fr.value("duration", 0.1));
-    } catch (...) {
-        media.error = "sprite.json unreadable";
-        return media;
+    if (direct) {
+        durations = item.original.value("anim_durations", std::vector<double>{});
+    } else {
+        try {
+            std::ifstream in(dir / "sprite.json");
+            nlohmann::json meta;
+            in >> meta;
+            for (const auto& fr : meta.value("frames", nlohmann::json::array())) durations.push_back(fr.value("duration", 0.1));
+        } catch (...) {
+            media.error = "sprite.json unreadable";
+            return media;
+        }
     }
     const std::size_t n = durations.size();
     const std::size_t full = v210_size(fmt.width, fmt.height);
@@ -375,35 +409,68 @@ Output::Media Output::load_animation(const LibraryItem& item, const fs::path& di
     const auto fill_path = dir / ("anim-" + fmt.name + ".v210");
     const auto a10_path = dir / ("anim-" + fmt.name + ".a10");
     std::error_code ec;
-    const auto stamp = std::to_string(fs::last_write_time(fill_path, ec).time_since_epoch().count());
+    std::string stamp;
+    if (direct) {
+        stamp = "direct|" + item.fit + "|" + item.alpha_mode;
+    } else {
+        stamp = std::to_string(fs::last_write_time(fill_path, ec).time_since_epoch().count());
+    }
     if (n == 0 || ec) {
-        media.error = "clip files missing; re-convert the item";
+        media.error = direct ? item.original.value("anim_error", "the animation could not be decoded") : "clip files missing; re-convert the item";
         return media;
     }
+    // A direct animation is decoded from the original once, for its fill and its alpha.
+    std::vector<std::uint8_t> dec_fill, dec_a10;
+    bool decoded = false;
+    std::string err;
+    auto decode = [&]() {
+        if (decoded) return true;
+        std::vector<double> d;
+        decoded = render_animation((dir / item.original.value("filename", "original.bin")).string(), item.fit, item.alpha_mode == "premultiplied", fmt,
+                                   library_.ram_budget(), dec_fill, dec_a10, d, err) &&
+                  d.size() == n;
+        if (!decoded && err.empty()) err = "the animation changed since it was uploaded; upload it again";
+        return decoded;
+    };
     auto read_all = [](const fs::path& p, std::vector<std::uint8_t>& out) {
         std::ifstream in(p, std::ios::binary);
         return in.read(reinterpret_cast<char*>(out.data()), static_cast<std::streamsize>(out.size())) &&
                in.gcount() == static_cast<std::streamsize>(out.size());
     };
+    auto load_fill = [&](std::vector<std::uint8_t>& out) {
+        if (!direct) return read_all(fill_path, out);
+        if (!decode() || dec_fill.size() != out.size()) return false;
+        out.swap(dec_fill);
+        return true;
+    };
+    auto load_a10 = [&](std::vector<std::uint8_t>& out) {
+        if (!direct) return read_all(a10_path, out);
+        if (dec_a10.empty() || !decoded) {
+            decoded = false;
+            if (!decode()) return false;
+        }
+        if (dec_a10.size() != out.size()) return false;
+        out.swap(dec_a10);
+        return true;
+    };
     // Shared by every output playing this item at this format: the fill, the v210a alpha, and the
     // fill_key key per key range (made from the alpha frame by frame, here and not per grain).
     const std::string base = item.id + "|" + fmt.name + "|" + stamp;
-    std::string err;
-    media.anim_fill = library_.shared_blob(base + "|fill", n * full, [&](std::vector<std::uint8_t>& out) { return read_all(fill_path, out); }, err);
+    media.anim_fill = library_.shared_blob(base + "|fill", n * full, load_fill, err);
     if (media.anim_fill && key_mode == KeyMode::V210a) {
-        media.anim_alpha = library_.shared_blob(base + "|a10", n * a10, [&](std::vector<std::uint8_t>& out) { return read_all(a10_path, out); }, err);
+        media.anim_alpha = library_.shared_blob(base + "|a10", n * a10, load_a10, err);
     } else if (media.anim_fill && key_mode == KeyMode::FillKey) {
         const std::string k = base + "|key|" + std::to_string(key_min) + "|" + std::to_string(key_max);
         media.anim_alpha = library_.shared_blob(k, n * full, [&](std::vector<std::uint8_t>& key) {
-            std::ifstream in(a10_path, std::ios::binary);
-            std::vector<std::uint8_t> plane(a10);
+            std::vector<std::uint8_t> planes(n * a10);
+            if (!load_a10(planes)) return false;
             std::vector<std::uint16_t> a(static_cast<std::size_t>(fmt.width)), ky(static_cast<std::size_t>(fmt.width));
             std::vector<std::uint16_t> kc(static_cast<std::size_t>(fmt.width / 2), kCMid);
             const std::uint32_t stride = v210_line_stride(fmt.width), astride = alpha10_line_stride(fmt.width);
             for (std::size_t f = 0; f < n; ++f) {
-                if (!in.read(reinterpret_cast<char*>(plane.data()), static_cast<std::streamsize>(a10))) return false;
+                const std::uint8_t* plane = planes.data() + f * a10;
                 for (int row = 0; row < fmt.height; ++row) {
-                    unpack_alpha10_line(plane.data() + static_cast<std::size_t>(row) * astride, fmt.width, a.data());
+                    unpack_alpha10_line(plane + static_cast<std::size_t>(row) * astride, fmt.width, a.data());
                     for (int x = 0; x < fmt.width; ++x) ky[x] = static_cast<std::uint16_t>(alpha_to_key(a[x] / 1023.0, key_min, key_max));
                     pack_v210_line(ky.data(), kc.data(), kc.data(), fmt.width, key.data() + f * full + static_cast<std::size_t>(row) * stride);
                 }
