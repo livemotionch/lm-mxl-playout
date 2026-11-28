@@ -217,6 +217,32 @@ bool Playout::seek(std::int64_t now, std::int64_t pos) {
     return true;
 }
 
+bool Playout::set_loop(std::int64_t now, bool on) {
+    Layer* l = tr_.active && !tr_.to_black && incoming_ ? incoming_.get() : program_.get();
+    if (!l) return false;
+    const bool looping = l->spec.end == EndAction::Loop;
+    if (on == looping) return true;
+    const std::int64_t len = length(*l);
+    std::int64_t pos = pos_at(*l, now);
+    if (on) {
+        if (!l->end_before) l->end_before = l->spec.end;
+        l->spec.end = EndAction::Loop;
+        if (l->ended || l->waiting) pos = 0;  // done: it plays again from its in point
+    } else {
+        l->spec.end = l->end_before.value_or(l->spec.entry >= 0 ? EndAction::Next : EndAction::Stop);
+        l->end_before.reset();
+        if (len > 0) pos %= len;  // the pass it is in plays to its end
+    }
+    l->hold_pos = pos;
+    if (l->ended || l->waiting) {
+        roll(*l, now);
+    } else if (l->playing && l->started) {
+        l->origin_pos = pos;
+        l->origin_frame = now;
+    }
+    return true;
+}
+
 bool Playout::jump(int index, std::shared_ptr<const PlaylistContext> ctx, std::int64_t now) {
     if (!ctx && program_) ctx = program_->ctx;
     if (!ctx && next_) ctx = next_->ctx;
@@ -351,6 +377,7 @@ nlohmann::json Playout::layer_json(const Layer& l, std::int64_t abs, double fps)
                      {"in", l.spec.in},
                      {"out", l.spec.out},
                      {"end", end_action_name(l.spec.end)},
+                     {"planned_end", end_action_name(l.end_before.value_or(l.spec.end))},
                      {"transition", transition_name(l.spec.transition)},
                      {"transition_frames", l.spec.transition_frames},
                      {"ready", l.ready},

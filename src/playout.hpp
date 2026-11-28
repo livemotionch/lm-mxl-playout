@@ -116,6 +116,11 @@ public:
     void clear_next();
     // Moves the program to `pos` frames after its in point (it keeps playing or stays paused).
     bool seek(std::int64_t now, std::int64_t pos);
+    // Loops the clip on air (the incoming one during a mix) from now on, or stops looping it: it
+    // then ends at the end of the pass it is in with the end action it had (a clip cued to loop:
+    // the next clip follows, a single clip goes to black). A clip held at its end plays again from
+    // its in point. Only this instance: the playlist entry is unchanged. False with nothing on air.
+    bool set_loop(std::int64_t now, bool on);
     // Cues entry `index` of the program's playlist (or of `ctx`) as the next clip.
     bool jump(int index, std::shared_ptr<const PlaylistContext> ctx, std::int64_t now);
 
@@ -151,6 +156,7 @@ private:
         std::int64_t origin_frame = 0;
         std::int64_t origin_pos = 0;
         std::int64_t hold_pos = 0;
+        std::optional<EndAction> end_before;  // the end action before set_loop changed it
     };
     struct Transition {
         bool active = false;

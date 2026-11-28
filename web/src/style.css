@@ -297,7 +297,8 @@ kbd { font-family: ui-monospace, monospace; font-size: .7rem; padding: .05rem .3
 .next-line { display: flex; align-items: center; gap: .5rem; min-width: 0; padding: .45rem .6rem; border-radius: 6px; background: var(--panel2); border-left: 3px solid var(--warn); font-size: .85rem; }
 .next-line .name { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .next-line .caption, .transition-row .caption { font-size: .7rem; color: var(--muted); text-transform: uppercase; letter-spacing: .05em; }
-.take-row { display: grid; grid-template-columns: 2fr 1fr 1fr 1fr; gap: .5rem; }
+.take-row { display: grid; grid-template-columns: 2fr 1fr 1fr 1fr 1fr; gap: .5rem; }
+.take-row .btn.secondary.on { background: var(--accent); color: #fff; }
 .take-row .btn { padding: .7rem .5rem; font-size: .95rem; }
 .btn.take { background: var(--live); font-size: 1.15rem !important; letter-spacing: .04em; text-transform: uppercase; }
 .onair.compact .take-row .btn { padding: .45rem .3rem; font-size: .82rem; }

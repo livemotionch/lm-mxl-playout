@@ -61,6 +61,8 @@ function onBar(event) {
 const pauseOrResume = () => playout(props.output.index, { action: running.value ? "pause" : "resume" });
 const stop = () => playout(props.output.index, { action: "stop" });
 const fade = () => playout(props.output.index, { action: "stop", transition: "mix", transition_frames: Math.max(1, Number(operator.frames) || 12) });
+const looping = computed(() => prog.value?.end === "loop");
+const toggleLoop = () => playout(props.output.index, { action: "loop", on: !looping.value });
 const clearNext = () => playout(props.output.index, { action: "clear" });
 function setTransition(v) {
   operator.transition = v;
@@ -88,7 +90,7 @@ function transitionText(l) {
     </div>
     <div v-if="prog" class="onair-meta">
       <span v-if="prog.playlist_name">{{ prog.playlist_name }} · {{ prog.entry + 1 }}/{{ prog.playlist_count }}</span>
-      <span>{{ END_TEXT[prog.end] || prog.end }}</span>
+      <span>{{ END_TEXT[prog.end] || prog.end }}<template v-if="prog.planned_end !== prog.end"> (instead of {{ END_TEXT[prog.planned_end] || prog.planned_end }})</template></span>
       <span v-if="!prog.ready" class="warn">loading…</span>
       <span v-if="output.media_error" class="bad">{{ output.media_error }}</span>
       <span v-if="playlist && !compact" class="spacer"></span>
@@ -124,6 +126,16 @@ function transitionText(l) {
       <button class="btn take" :disabled="!canTake" :title="`${takeLabel} (Space)`" @click="take(output.index)">{{ takeLabel }}</button>
       <button class="btn secondary big" :disabled="!prog || state === 'parked' || state === 'ended'" :title="running ? 'Pause (P)' : 'Resume (P)'" @click="pauseOrResume">
         {{ running ? "Pause" : "Resume" }}
+      </button>
+      <button
+        class="btn secondary big"
+        :class="{ on: looping }"
+        :disabled="!prog"
+        :aria-pressed="looping"
+        :title="looping ? 'Stop looping: the clip ends at the end of this pass (L)' : 'Loop the clip on air until the next take (L)'"
+        @click="toggleLoop"
+      >
+        Loop
       </button>
       <button class="btn secondary big" :disabled="!prog" title="Cut to black (B)" @click="stop">Black</button>
       <button class="btn secondary big" :disabled="!prog" :title="`Fade to black over ${operator.frames} frames (F)`" @click="fade">Fade</button>

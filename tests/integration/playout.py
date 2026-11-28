@@ -323,6 +323,26 @@ def main():
             assert e.code == 400, e.code
         wait_state("idle", timeout=3)
 
+        # Loop the clip on air: a clip that stops loops on (no black between the passes) until
+        # looping is off again, then it ends at the end of that pass.
+        playout({"action": "cue", "item_id": light["id"], "end": "stop"})
+        time.sleep(0.6)
+        start = tai_index()
+        playout({"action": "take"})
+        st = playout({"action": "loop", "on": True})
+        assert st["playout"]["program"]["end"] == "loop", st["playout"]["program"]
+        assert st["playout"]["program"]["planned_end"] == "stop", st["playout"]["program"]
+        time.sleep(3.2)
+        seq = [classify(y, levels) if y is not None else "none" for y in lumas(start - 2, start + 2 * FPS + 25)]
+        r = runs(seq)
+        print("loop on air", r, "missed", http("GET", "/api/v1/outputs/0")["stream_missed"])
+        assert runs(from_first(seq, "light"))[0][1] >= 2 * FPS + 20, r
+        playout({"action": "loop"}, expect=400)
+        st = playout({"action": "loop", "on": False})
+        assert st["playout"]["program"]["end"] == "stop", st["playout"]["program"]
+        wait_state("idle", timeout=2)
+        playout({"action": "loop", "on": True}, expect=409)
+
         # The clip level: measured after the upload (EBU R128), a gain applied while it plays (no
         # conversion), and the automatic level to -23 LUFS.
         deadline = time.time() + 30

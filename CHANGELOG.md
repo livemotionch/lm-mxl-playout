@@ -10,7 +10,7 @@ The Livemotion fork of mxl-test-player 1.3.3 as a media playout. See README "Pla
 - **Rundown playlists.** An entry has an in and out point, an end action (`next`, `hold`, `loop`, `stop`), a transition into it (`cut`, `mix`, `dip`, with frames) and, for a still, a hold time. A playlist can loop. Entries get stable ids. The next entry is cued by itself.
 - **Frame-accurate transitions.** The next clip is loaded ahead: from RAM, or primed in a second decode-ahead stream (an output has two now, `src/stream.cpp`), so a take cuts on the frame and an auto-advance mix starts that many frames before the outgoing clip ends. A streamed clip counts as ready only once its stream holds its in point. Mix and dip blend the picture, the key or alpha (`mix_v210`, `mix_a10`) and the sound (gain ramped across each grain). A command takes effect at the next frame the output writes.
 - **Status.** The output's status has a `playout` object: state, program, incoming, next (with `ready`), the transition, countdowns of the clip and the playlist. `transport` maps onto it (play, pause, stop) for the metrics and the test player's UI.
-- **UI.** A Playout tab first: picture, meters and the on-air panel (Take, Pause/Resume, Black, Fade, the take's transition; keys Space, P, B, F), with a shotbox (click cues, double click plays; what a single clip does at its end) and a rundown. The Playlists tab edits in/out, end actions, transitions and hold times. Library "Play on" cues and takes.
+- **UI.** A Playout tab first: picture, meters and the on-air panel (Take, Pause/Resume, Loop, Black, Fade, the take's transition; keys Space, P, L, B, F), with a shotbox (click cues, double click plays; what a single clip does at its end) and a rundown. The Playlists tab edits in/out, end actions, transitions and hold times. Library "Play on" cues and takes.
 - **Widgets.** `transport` is the on-air panel on a playout output; new `shotbox` and `rundown` (`playlist` optional).
 
 ### Uploads play as uploaded
@@ -24,6 +24,10 @@ The Livemotion fork of mxl-test-player 1.3.3 as a media playout. See README "Pla
 ### Auto take
 
 - Per output (`PLAYER_AUTO_TAKE`, `auto_take` in the configuration file and in `PATCH /api/v1/outputs/{id}`, Playout tab "Auto take", kept in the state file): when the clip on air is done, the cued clip goes on air by itself with its own transition (a mix or dip starts that many frames before the end, as in a playlist). It applies to a clip that stops or holds, and to one already held or gone to black; a clip that loops loops on until a take. A cued clip still loading holds the last frame until it is ready. With nothing on air a cue goes on air once it is loaded instead of parking. The next clip shows "auto".
+
+### Loop on air
+
+- `POST /api/v1/outputs/{id}/playout` `{"action": "loop", "on": true}`, Playout tab "Loop" (key L): the clip on air loops until the next take, whatever its end action; off again, it ends at the end of the pass it is in with the end action it had. A clip held at its end plays again from its in point. Only that instance changes, not the playlist entry. The program's status has `planned_end`; the on-air panel shows "loops (instead of then next)".
 
 ### Clip level
 

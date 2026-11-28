@@ -128,6 +128,7 @@ Precedence is environment, then the JSON file (`--config`, else `PLAYER_CONFIG`,
 | `stop` | black; with `transition` `mix` and `transition_frames` a fade. The next clip stays cued |
 | `clear` | removes the next clip |
 | `seek` | `frame` (from the clip's in point) or `seconds` |
+| `loop` | `on`: true loops the clip on air (the incoming one during a mix) until the next take; false ends it at the end of the pass it is in, with the end action it had (a clip cued to loop: a playlist entry is followed by the next one, a single clip goes to black). A clip held at its end plays again from its in point. Only this instance: the playlist is unchanged. The program's `end` is `loop` then, `planned_end` the end action it had |
 | `jump` | cues `entry` or `entry_id` of the playlist on air (or of `playlist_id`) as the next clip |
 
 A playlist is `{id, name, loop, entries: [{id, item_id, in_s, out_s, hold_s, end, transition, transition_frames}]}`; the player gives entries their ids. A playlist plays as it was cued: edit it and cue it again to change what is on air. On a playout output the test player's transport still works (`play` takes or resumes, `pause`, `stop` cuts to black, `restart`, `step`).

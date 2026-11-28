@@ -1,7 +1,7 @@
 <script setup>
 // Playout (operator screen): the selected output's picture and on-air panel (Take, Pause, Black,
 // Fade), and the shotbox or the rundown to cue from. Keys (outside text fields): Space take,
-// P pause/resume, B black, F fade to black.
+// P pause/resume, L loop the clip on air, B black, F fade to black.
 import { computed, onMounted, onUnmounted, ref } from "vue";
 import LivePicture from "./LivePicture.vue";
 import Meters from "./Meters.vue";
@@ -50,6 +50,8 @@ function onKey(e) {
     take(o.value.index);
   } else if (e.key === "p" || e.key === "P") {
     playout(o.value.index, { action: ["playing", "transition", "waiting"].includes(st) ? "pause" : "resume" });
+  } else if ((e.key === "l" || e.key === "L") && o.value.playout?.program) {
+    playout(o.value.index, { action: "loop", on: o.value.playout.program.end !== "loop" });
   } else if (e.key === "b" || e.key === "B") {
     playout(o.value.index, { action: "stop" });
   } else if (e.key === "f" || e.key === "F") {
@@ -71,7 +73,7 @@ onUnmounted(() => window.removeEventListener("keydown", onKey));
       <input type="checkbox" :checked="!!o.playout?.auto_take" @change="patchOutput(o.index, { auto_take: $event.target.checked })" /> Auto take
     </label>
     <span class="spacer"></span>
-    <span class="muted small keys"><kbd>Space</kbd> take · <kbd>P</kbd> pause · <kbd>B</kbd> black · <kbd>F</kbd> fade</span>
+    <span class="muted small keys"><kbd>Space</kbd> take · <kbd>P</kbd> pause · <kbd>L</kbd> loop · <kbd>B</kbd> black · <kbd>F</kbd> fade</span>
   </div>
   <div v-if="!o" class="empty">{{ live.error || "Waiting for the player…" }}</div>
   <div v-else-if="!isPlayout" class="panel">

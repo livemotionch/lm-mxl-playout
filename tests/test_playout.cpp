@@ -525,3 +525,95 @@ TEST_CASE("playout: auto take puts the cued clip on air when the program is done
         CHECK(on_air(p, p.tick(8)) == "a");
     }
 }
+
+TEST_CASE("playout: loop the clip on air, and stop looping it") {
+    SUBCASE("a clip that stops loops once looping is on, and its playlist entry stays as it was") {
+        Playout p;
+        auto ctx = playlist({clip("a", EndAction::Next), clip("b", EndAction::Stop)});
+        p.cue(ctx->entries[0], ctx, 0);
+        ready_all(p, {{"a", 4}});
+        p.take(0);
+        ready_all(p, {{"a", 4}});
+        CHECK(p.tick(0).a.frame == 0);
+        CHECK(p.tick(1).a.frame == 1);
+        REQUIRE(p.set_loop(2, true));
+        CHECK(p.status(2, 50)["program"].value("end", "") == "loop");
+        CHECK(p.status(2, 50)["program"].value("planned_end", "") == "next");
+        for (int t = 2; t < 4; ++t) CHECK(p.tick(t).a.frame == t);
+        auto f = p.tick(4);
+        CHECK(on_air(p, f) == "a");  // the next entry is cued, but a stays on air
+        CHECK(f.a.frame == 0);
+        CHECK(f.a.rolling);
+        CHECK(p.tick(9).a.frame == 1);
+        CHECK(ctx->entries[0].end == EndAction::Next);
+        // Off again: the pass it is in plays to its end, then the next entry follows.
+        REQUIRE(p.set_loop(9, false));
+        CHECK(p.status(9, 50)["program"].value("end", "") == "next");
+        CHECK(p.tick(10).a.frame == 2);
+        CHECK(p.tick(11).a.frame == 3);
+        f = p.tick(12);
+        CHECK(on_air(p, f) == "b");
+        CHECK(f.a.frame == 0);
+    }
+    SUBCASE("a clip held at its end plays again from its in point") {
+        Playout p;
+        auto c = clip("a", EndAction::Hold);
+        c.in = 2;
+        p.cue(c, nullptr, 0);
+        ready_all(p, {{"a", 6}});
+        p.take(0);
+        for (int t = 0; t < 6; ++t) p.tick(t);
+        CHECK(state(p, 6) == "ended");
+        CHECK(p.tick(6).a.frame == 5);
+        REQUIRE(p.set_loop(7, true));
+        auto f = p.tick(7);
+        CHECK(f.a.frame == 2);
+        CHECK(f.a.rolling);
+        CHECK(p.tick(11).a.frame == 2);  // 4 frames long: looped
+    }
+    SUBCASE("a clip cued to loop ends at the end of the pass when looping is off") {
+        Playout p;
+        p.cue(clip("a", EndAction::Loop), nullptr, 0);
+        ready_all(p, {{"a", 4}});
+        p.take(0);
+        p.tick(0);
+        CHECK(p.tick(9).a.frame == 1);
+        REQUIRE(p.set_loop(9, false));
+        CHECK(p.status(9, 50)["program"].value("end", "") == "stop");
+        CHECK(p.tick(11).a.frame == 3);
+        CHECK(p.tick(12).a.layer == 0);  // a single clip: black
+    }
+    SUBCASE("a paused clip keeps its frame and loops once it resumes") {
+        Playout p;
+        p.cue(clip("a", EndAction::Stop), nullptr, 0);
+        ready_all(p, {{"a", 4}});
+        p.take(0);
+        p.tick(0);
+        p.tick(2);
+        p.pause(3);
+        REQUIRE(p.set_loop(5, true));
+        CHECK(p.tick(5).a.frame == 3);
+        p.resume(6);
+        CHECK(p.tick(6).a.frame == 3);
+        CHECK(p.tick(7).a.frame == 0);
+    }
+    SUBCASE("with auto take a looping clip waits for a take") {
+        Playout p;
+        p.cue(clip("a", EndAction::Stop), nullptr, 0);
+        ready_all(p, {{"a", 4}});
+        p.take(0);
+        p.tick(0);
+        p.set_auto_take(true);
+        p.cue(clip("b"), nullptr, 0);
+        ready_all(p, {{"a", 4}});
+        REQUIRE(p.set_loop(1, true));
+        CHECK(on_air(p, p.tick(6)) == "a");
+        REQUIRE(p.set_loop(6, false));  // at frame 2 of a pass: it ends after frame 3
+        CHECK(p.tick(7).a.frame == 3);
+        CHECK(on_air(p, p.tick(8)) == "b");
+    }
+    SUBCASE("nothing on air: false") {
+        Playout p;
+        CHECK_FALSE(p.set_loop(0, true));
+    }
+}

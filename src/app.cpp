@@ -462,6 +462,11 @@ void App::Impl::playout_action(Output& o, const json& b, HttpResponse& res) {
             p.clear_next();
             return true;
         });
+    } else if (action == "loop") {
+        if (!b.contains("on") || !b.at("on").is_boolean()) return answer(json{{"error", "loop needs \"on\": true or false"}}, 400);
+        const bool on = b.at("on").get<bool>();
+        ok = o.playout([&](Playout& p, std::int64_t now) { return p.set_loop(now, on); });
+        if (!ok) error = "nothing on air";
     } else if (action == "seek") {
         const double fps = fmt.frame_rate.to_double();
         std::int64_t frame = b.contains("seconds") && b.at("seconds").is_number() ? std::llround(b.at("seconds").get<double>() * fps) : b.value("frame", std::int64_t{0});

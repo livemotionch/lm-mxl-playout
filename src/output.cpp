@@ -639,6 +639,7 @@ void Output::sync_layers() {
             }
             found = layers_.emplace(r.id, std::move(e)).first;
         }
+        found->second.spec = r.spec;  // the end action can change on air (loop)
         found->second.preroll = r.preroll;
         found->second.order = order++;
     }
